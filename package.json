@@ -7,6 +7,14 @@
     "server": "node server/index.js",
     "start": "node server/index.js"
   },
-  "keywords": ["threejs", "earth", "visualization", "streaming"],
-  "license": "MIT"
+  "keywords": [
+    "threejs",
+    "earth",
+    "visualization",
+    "streaming"
+  ],
+  "license": "MIT",
+  "dependencies": {
+    "three": "^0.160.0"
+  }
 }

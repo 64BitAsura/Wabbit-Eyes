@@ -219,7 +219,8 @@
 
   // --------------- Data Store ---------------
   const vessels = new Map(); // id -> vessel data
-  const trailLines = new Map(); // id -> { line, positions, opacities, idx }
+  const trailLines = new Map(); // id -> { line, buffer, len }
+  let trailsDirty = false; // only rebuild trails when new data arrives
 
   function getVesselColor(type) {
     return COLORS.vessel[type] || COLORS.vessel.default;
@@ -253,6 +254,7 @@
       }
     });
 
+    trailsDirty = true;
     vesselCountEl.textContent = `${vessels.size} vessels`;
   }
 
@@ -286,32 +288,55 @@
   function updateTrails() {
     const showTrails = toggleTrails.checked;
     trailGroup.visible = showTrails;
-    if (!showTrails) return;
-
-    const now = Date.now();
+    if (!showTrails || !trailsDirty) return;
+    trailsDirty = false;
 
     vessels.forEach((v, id) => {
-      if (v.trail.length < 2) return;
+      if (v.trail.length < 2) {
+        // Remove trail line if vessel has too few points
+        const existing = trailLines.get(id);
+        if (existing) {
+          trailGroup.remove(existing.line);
+          existing.line.geometry.dispose();
+          existing.line.material.dispose();
+          trailLines.delete(id);
+        }
+        return;
+      }
 
       let entry = trailLines.get(id);
-      const points = v.trail.map(p => new THREE.Vector3(p.x, p.y, 0.5));
 
       if (entry) {
-        // Reuse geometry — update positions
-        entry.line.geometry.dispose();
-        entry.line.geometry = new THREE.BufferGeometry().setFromPoints(points);
+        // Update existing buffer in-place
+        const posAttr = entry.line.geometry.getAttribute('position');
+        const trail = v.trail;
+        let i = 0;
+        for (; i < trail.length; i++) {
+          posAttr.setXYZ(i, trail[i].x, trail[i].y, 0.5);
+        }
+        entry.line.geometry.setDrawRange(0, i);
+        posAttr.needsUpdate = true;
       } else {
+        // Create new trail line with pre-allocated buffer
         const col = getVesselColor(v.type);
         const mat = new THREE.LineBasicMaterial({
           color: col,
           transparent: true,
           opacity: 0.4,
         });
-        const geo = new THREE.BufferGeometry().setFromPoints(points);
+        const positions = new Float32Array(TRAIL_LENGTH * 3);
+        const trail = v.trail;
+        for (let i = 0; i < trail.length; i++) {
+          positions[i * 3] = trail[i].x;
+          positions[i * 3 + 1] = trail[i].y;
+          positions[i * 3 + 2] = 0.5;
+        }
+        const geo = new THREE.BufferGeometry();
+        geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+        geo.setDrawRange(0, trail.length);
         const line = new THREE.Line(geo, mat);
         trailGroup.add(line);
-        entry = { line };
-        trailLines.set(id, entry);
+        trailLines.set(id, { line });
       }
     });
 
@@ -327,8 +352,6 @@
   }
 
   // --------------- Tooltip ---------------
-  const raycaster = new THREE.Raycaster();
-  const mouse = new THREE.Vector2();
 
   function updateTooltip(event) {
     // Convert screen to world coords
