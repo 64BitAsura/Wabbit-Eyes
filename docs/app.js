@@ -497,7 +497,8 @@
   // Detect environment and connect
   function tryConnect() {
     // If served from GitHub Pages or file://, go straight to demo mode
-    const isGitHubPages = window.location.hostname.includes('github.io');
+    const isGitHubPages = window.location.hostname === 'github.io' ||
+      window.location.hostname.endsWith('.github.io');
     const isFile = window.location.protocol === 'file:';
 
     if (isGitHubPages || isFile) {
