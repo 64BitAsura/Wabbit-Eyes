@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Wabbit Eyes — Global Vessel Tracker</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div id="ui-overlay">
+    <div id="header">
+      <h1>WABBIT <span class="accent">EYES</span></h1>
+      <div id="stats">
+        <span id="fps-counter">60 FPS</span>
+        <span id="vessel-count">0 vessels</span>
+        <span id="stream-status" class="disconnected">OFFLINE</span>
+      </div>
+    </div>
+    <div id="tooltip" class="hidden"></div>
+    <div id="controls">
+      <label title="Toggle vessel trails">
+        <input type="checkbox" id="toggle-trails" checked /> Trails
+      </label>
+      <label title="Toggle grid overlay">
+        <input type="checkbox" id="toggle-grid" checked /> Grid
+      </label>
+      <label title="Toggle demo mode (client-side mock data)">
+        <input type="checkbox" id="toggle-demo" /> Demo Mode
+      </label>
+    </div>
+  </div>
+  <canvas id="main-canvas"></canvas>
+
+  <!-- Three.js from CDN -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+  <script src="mock-client.js"></script>
+  <script src="geo-data.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

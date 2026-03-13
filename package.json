@@ -1,0 +1,12 @@
+{
+  "name": "wabbit-eyes",
+  "version": "1.0.0",
+  "description": "Three.js 2D Earth visualization with real-time streaming object tracking",
+  "main": "server/index.js",
+  "scripts": {
+    "server": "node server/index.js",
+    "start": "node server/index.js"
+  },
+  "keywords": ["threejs", "earth", "visualization", "streaming"],
+  "license": "MIT"
+}
