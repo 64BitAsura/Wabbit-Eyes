@@ -38,7 +38,7 @@ class Vessel {
   constructor(id) {
     this.id = `VESSEL-${String(id).padStart(4, '0')}`;
     this.type = VESSEL_TYPES[Math.floor(Math.random() * VESSEL_TYPES.length)];
-    this.mmsi = String(200000000 + Math.floor(Math.random() * 600000000));
+    this.mmsi = String(201000000 + Math.floor(Math.random() * 574999999));
     // Pick a random shipping lane
     this.laneIndex = Math.floor(Math.random() * SHIPPING_LANES.length);
     this.lane = SHIPPING_LANES[this.laneIndex];

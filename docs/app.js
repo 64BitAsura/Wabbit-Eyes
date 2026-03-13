@@ -382,10 +382,12 @@
       tooltipEl.classList.remove('hidden');
       tooltipEl.style.left = (event.clientX + 15) + 'px';
       tooltipEl.style.top = (event.clientY - 10) + 'px';
+      const latHemi = closest.latitude >= 0 ? 'N' : 'S';
+      const lngHemi = closest.longitude >= 0 ? 'E' : 'W';
       tooltipEl.textContent =
         `${closest.id}  [${closest.type.toUpperCase()}]\n` +
         `MMSI: ${closest.mmsi}\n` +
-        `Pos:  ${closest.latitude.toFixed(4)}°N  ${closest.longitude.toFixed(4)}°E\n` +
+        `Pos:  ${Math.abs(closest.latitude).toFixed(4)}°${latHemi}  ${Math.abs(closest.longitude).toFixed(4)}°${lngHemi}\n` +
         `Vel:  ${closest.velocity.toFixed(1)} kn\n` +
         `Dir:  ${closest.direction.toFixed(1)}°\n` +
         `Elev: ${closest.elevation.toFixed(1)} m`;
