@@ -6,18 +6,72 @@
 
 /* eslint-disable no-unused-vars */
 const MockClient = (() => {
+  // Major shipping lanes – waypoints placed in open water, away from coastlines
   const SHIPPING_LANES = [
-    [{ lng: 121.5, lat: 31.2 }, { lng: 140.0, lat: 35.0 }, { lng: 180.0, lat: 40.0 }, { lng: -150.0, lat: 45.0 }, { lng: -122.4, lat: 37.8 }],
-    [{ lng: -5.0, lat: 36.0 }, { lng: -20.0, lat: 38.0 }, { lng: -40.0, lat: 38.0 }, { lng: -60.0, lat: 40.0 }, { lng: -74.0, lat: 40.7 }],
-    [{ lng: 32.3, lat: 30.0 }, { lng: 43.0, lat: 12.5 }, { lng: 55.0, lat: 10.0 }, { lng: 73.0, lat: 10.0 }, { lng: 80.0, lat: 6.0 }, { lng: 103.8, lat: 1.3 }],
-    [{ lng: -9.0, lat: 38.7 }, { lng: -5.0, lat: 36.0 }, { lng: 3.0, lat: 43.0 }, { lng: 10.0, lat: 44.0 }, { lng: 15.0, lat: 42.0 }],
-    [{ lng: -43.2, lat: -22.9 }, { lng: -38.5, lat: -12.9 }, { lng: -34.8, lat: -8.0 }, { lng: -35.0, lat: 0.0 }, { lng: -50.0, lat: 5.0 }],
-    [{ lng: 18.4, lat: -33.9 }, { lng: 25.0, lat: -34.0 }, { lng: 35.0, lat: -25.0 }, { lng: 40.0, lat: -15.0 }, { lng: 49.0, lat: -12.0 }],
-    [{ lng: 4.5, lat: 51.9 }, { lng: 8.0, lat: 54.0 }, { lng: 12.0, lat: 56.0 }, { lng: 18.0, lat: 59.0 }, { lng: 25.0, lat: 60.0 }],
-    [{ lng: 103.8, lat: 1.3 }, { lng: 110.0, lat: 10.0 }, { lng: 114.2, lat: 22.3 }, { lng: 121.5, lat: 31.2 }, { lng: 129.0, lat: 35.0 }],
+    // Trans-Pacific (East China Sea → Japan → Mid-Pacific → offshore San Francisco)
+    [{ lng: 123.0, lat: 30.0 }, { lng: 135.0, lat: 34.0 }, { lng: 155.0, lat: 38.0 }, { lng: 180.0, lat: 40.0 }, { lng: -160.0, lat: 43.0 }, { lng: -140.0, lat: 42.0 }, { lng: -124.0, lat: 37.5 }],
+    // Trans-Atlantic (offshore Gibraltar → Mid-Atlantic → offshore New York)
+    [{ lng: -6.0, lat: 36.0 }, { lng: -15.0, lat: 37.0 }, { lng: -30.0, lat: 38.0 }, { lng: -50.0, lat: 39.0 }, { lng: -65.0, lat: 40.0 }, { lng: -72.0, lat: 40.0 }],
+    // Red Sea → Arabian Sea → Indian Ocean → Malacca Strait
+    [{ lng: 36.0, lat: 25.0 }, { lng: 40.0, lat: 18.0 }, { lng: 43.5, lat: 12.5 }, { lng: 52.0, lat: 12.0 }, { lng: 65.0, lat: 12.0 }, { lng: 76.0, lat: 8.0 }, { lng: 80.5, lat: 5.0 }, { lng: 95.0, lat: 3.0 }, { lng: 103.5, lat: 1.5 }],
+    // Mediterranean (offshore Portugal → Gibraltar → Balearic → Ligurian → Tyrrhenian Sea)
+    [{ lng: -9.5, lat: 38.5 }, { lng: -6.0, lat: 36.5 }, { lng: 0.0, lat: 37.0 }, { lng: 5.0, lat: 39.0 }, { lng: 7.5, lat: 42.0 }, { lng: 13.5, lat: 40.0 }],
+    // South America (offshore Rio → offshore Recife → Equatorial Atlantic)
+    [{ lng: -41.5, lat: -24.0 }, { lng: -36.0, lat: -14.0 }, { lng: -33.0, lat: -8.0 }, { lng: -32.0, lat: -3.0 }, { lng: -40.0, lat: 1.0 }],
+    // Cape of Good Hope (offshore Cape Town → Southern Ocean → Mozambique Channel)
+    [{ lng: 16.5, lat: -35.0 }, { lng: 22.0, lat: -35.5 }, { lng: 30.0, lat: -32.0 }, { lng: 36.0, lat: -24.0 }, { lng: 40.0, lat: -16.0 }, { lng: 49.0, lat: -12.0 }],
+    // Northern Europe (North Sea → Kattegat → Baltic Sea)
+    [{ lng: 3.0, lat: 53.0 }, { lng: 6.0, lat: 55.5 }, { lng: 11.0, lat: 56.5 }, { lng: 16.0, lat: 58.0 }, { lng: 20.0, lat: 59.5 }],
+    // East Asia coastal (Singapore Strait → South China Sea → East China Sea → Korea Strait)
+    [{ lng: 104.5, lat: 1.0 }, { lng: 108.0, lat: 6.0 }, { lng: 112.0, lat: 14.0 }, { lng: 116.0, lat: 20.0 }, { lng: 121.0, lat: 26.0 }, { lng: 123.0, lat: 30.0 }, { lng: 128.0, lat: 34.0 }],
   ];
 
   const VESSEL_TYPES = ['cargo', 'tanker', 'container', 'bulk_carrier', 'lng_carrier', 'roro', 'passenger'];
+
+  // Realistic speed ranges by vessel type (knots)
+  const SPEED_RANGES = {
+    cargo:        { min: 12, max: 16 },
+    tanker:       { min: 12, max: 16 },
+    container:    { min: 16, max: 22 },
+    bulk_carrier: { min: 11, max: 15 },
+    lng_carrier:  { min: 16, max: 20 },
+    roro:         { min: 15, max: 20 },
+    passenger:    { min: 18, max: 24 },
+  };
+
+  const EMIT_INTERVAL_MS = 200;
+
+  // Normalize a longitude difference to [-180, 180] for date-line-safe calculations
+  function lngDiff(from, to) {
+    let d = to - from;
+    if (d > 180) d -= 360;
+    if (d < -180) d += 360;
+    return d;
+  }
+
+  function wrapLng(lng) {
+    if (lng > 180) lng -= 360;
+    if (lng < -180) lng += 360;
+    return lng;
+  }
+
+  // Approximate length of a shipping lane in nautical miles
+  function calcLaneLengthNM(lane) {
+    let total = 0;
+    for (let i = 0; i < lane.length - 1; i++) {
+      const a = lane[i], b = lane[i + 1];
+      const dLat = (b.lat - a.lat) * 60;
+      const avgLat = ((a.lat + b.lat) / 2) * Math.PI / 180;
+      const dLng = lngDiff(a.lng, b.lng) * 60 * Math.cos(avgLat);
+      total += Math.sqrt(dLng * dLng + dLat * dLat);
+    }
+    return total;
+  }
+
+  const LANE_LENGTHS = SHIPPING_LANES.map(calcLaneLengthNM);
+
+  // Simulation runs faster than real-time so vessels visibly traverse lanes
+  const TIME_SCALE = 3000;
 
   class Vessel {
     constructor(id) {
@@ -26,13 +80,23 @@ const MockClient = (() => {
       this.mmsi = String(201000000 + Math.floor(Math.random() * 574999999));
       this.laneIndex = Math.floor(Math.random() * SHIPPING_LANES.length);
       this.lane = SHIPPING_LANES[this.laneIndex];
+      this.laneLengthNM = LANE_LENGTHS[this.laneIndex];
       this.progress = Math.random();
-      this.speed = 0.0002 + Math.random() * 0.0006;
       this.reverse = Math.random() > 0.5;
-      this.lngOffset = (Math.random() - 0.5) * 4;
-      this.latOffset = (Math.random() - 0.5) * 2;
+      // Small offset from the lane centerline (keeps vessels on water)
+      this.lngOffset = (Math.random() - 0.5) * 1.0;
+      this.latOffset = (Math.random() - 0.5) * 0.5;
       this.elevation = Math.random() * 5;
+      // Set initial velocity based on vessel type (knots)
+      const range = SPEED_RANGES[this.type];
+      this.velocity = range.min + Math.random() * (range.max - range.min);
+      this._updateSpeed();
       this._updatePosition();
+    }
+
+    // Convert velocity (knots) to progress-per-tick using lane length
+    _updateSpeed() {
+      this.speed = (this.velocity / 3600) * (EMIT_INTERVAL_MS / 1000) * TIME_SCALE / this.laneLengthNM;
     }
 
     _interpolateLane(progress) {
@@ -43,10 +107,11 @@ const MockClient = (() => {
       const t = segFloat - segIndex;
       const a = lane[segIndex];
       const b = lane[segIndex + 1];
+      const dLng = lngDiff(a.lng, b.lng);
       return {
-        lng: a.lng + (b.lng - a.lng) * t,
+        lng: wrapLng(a.lng + dLng * t),
         lat: a.lat + (b.lat - a.lat) * t,
-        dirLng: b.lng - a.lng,
+        dirLng: dLng,
         dirLat: b.lat - a.lat,
       };
     }
@@ -57,17 +122,21 @@ const MockClient = (() => {
       this.latitude = pos.lat + this.latOffset;
       this.direction = (Math.atan2(pos.dirLng, pos.dirLat) * 180 / Math.PI + 360) % 360;
       if (this.reverse) this.direction = (this.direction + 180) % 360;
-      this.velocity = 10 + Math.random() * 15;
+      // Gradually drift velocity (±0.2 knots per tick, clamped to type range)
+      const range = SPEED_RANGES[this.type];
+      this.velocity += (Math.random() - 0.5) * 0.4;
+      this.velocity = Math.max(range.min, Math.min(range.max, this.velocity));
+      this._updateSpeed();
       this.elevation += (Math.random() - 0.5) * 0.2;
       this.elevation = Math.max(0, Math.min(20, this.elevation));
     }
 
     tick() {
       if (this.reverse) {
-        this.progress -= this.speed * (0.8 + Math.random() * 0.4);
+        this.progress -= this.speed;
         if (this.progress < 0) { this.progress = 0; this.reverse = false; }
       } else {
-        this.progress += this.speed * (0.8 + Math.random() * 0.4);
+        this.progress += this.speed;
         if (this.progress > 1) { this.progress = 1; this.reverse = true; }
       }
       this._updatePosition();
