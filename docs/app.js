@@ -9,7 +9,7 @@
   'use strict';
 
   // --------------- Configuration ---------------
-  const MAX_VESSELS = 500;
+  const MAX_VESSELS = 1000;
   const TRAIL_LENGTH = 40;          // points per trail
   const TRAIL_FADE_TIME = 30000;    // ms before oldest trail point fades
   const MAP_WIDTH = 360;
