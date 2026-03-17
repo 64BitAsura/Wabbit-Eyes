@@ -7,7 +7,7 @@ import xml.etree.ElementTree as ET
 import math
 import random
 from typing import List, Dict, Optional
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 
 class TrackManager:
@@ -240,7 +240,7 @@ class TrackManager:
             'elevation': 0.0,
             'speed': current_speed,
             'course': self.sim_heading,
-            'timestamp': datetime.utcnow()
+            'timestamp': datetime.now(timezone.utc)
         }
     
     def get_track_info(self) -> Dict:
