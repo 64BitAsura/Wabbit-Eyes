@@ -145,3 +145,169 @@ body {
 #tooltip.hidden {
   opacity: 0;
 }
+
+/* ---- Intel status badge ---- */
+#intel-status.connected {
+  background: rgba(0, 230, 118, 0.18);
+  color: var(--success);
+}
+
+#intel-status.disconnected {
+  background: rgba(255, 23, 68, 0.18);
+  color: var(--danger);
+}
+
+/* ---- Classification HUD ---- */
+#classification-hud {
+  pointer-events: none;
+  position: fixed;
+  top: 56px;
+  right: 24px;
+  display: flex;
+  gap: 10px;
+  font-family: var(--mono);
+  font-size: 11px;
+}
+
+#classification-hud.hidden {
+  display: none;
+}
+
+.hud-item {
+  padding: 4px 10px;
+  border-radius: 4px;
+  background: var(--panel);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.hud-item strong {
+  font-weight: 700;
+}
+
+.normal-count  { color: var(--success); }
+.anomaly-count { color: #e040fb; }
+.warming-count { color: #ffca28; }
+
+/* ---- Anomaly Feed Panel ---- */
+#anomaly-feed {
+  pointer-events: auto;
+  position: fixed;
+  bottom: 60px;
+  right: 24px;
+  width: 320px;
+  max-height: 380px;
+  overflow-y: auto;
+  background: var(--panel);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 8px;
+  backdrop-filter: blur(12px);
+  z-index: 20;
+}
+
+#anomaly-feed.hidden {
+  display: none;
+}
+
+#anomaly-feed-header {
+  padding: 8px 14px;
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 2px;
+  color: var(--accent);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  text-transform: uppercase;
+}
+
+#anomaly-feed-list {
+  padding: 4px 0;
+}
+
+/* ---- Feed Entry ---- */
+.feed-entry {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 12px;
+  cursor: pointer;
+  transition: background 0.15s;
+  animation: slideInFeed 0.2s ease-out;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+}
+
+.feed-entry:hover {
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.feed-dot {
+  flex-shrink: 0;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+}
+
+.feed-vessel-id {
+  flex: 1;
+  color: var(--text-bright);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.label-chip {
+  padding: 1px 6px;
+  border-radius: 3px;
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.confidence-bar {
+  width: 36px;
+  height: 6px;
+  background: rgba(255, 255, 255, 0.1);
+  border-radius: 3px;
+  overflow: hidden;
+  flex-shrink: 0;
+}
+
+.confidence-fill {
+  height: 100%;
+  border-radius: 3px;
+  background: var(--accent);
+}
+
+.feed-time {
+  font-size: 10px;
+  color: rgba(200, 214, 229, 0.5);
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+/* ---- Anomaly type colors ---- */
+.dot-velocity_spike    { background: #e040fb; }
+.dot-heading_deviation { background: #ff6d00; }
+.dot-route_digression  { background: #ff1744; }
+.dot-stop              { background: #ffca28; }
+.dot-regime_change     { background: #aa00ff; }
+
+.chip-velocity_spike    { background: rgba(224,64,251,0.2); color: #e040fb; }
+.chip-heading_deviation { background: rgba(255,109,0,0.2);  color: #ff6d00; }
+.chip-route_digression  { background: rgba(255,23,68,0.2);  color: #ff1744; }
+.chip-stop              { background: rgba(255,202,40,0.2); color: #ffca28; }
+.chip-regime_change     { background: rgba(170,0,255,0.2);  color: #aa00ff; }
+
+/* ---- Animations ---- */
+@keyframes slideInFeed {
+  from { transform: translateX(20px); opacity: 0; }
+  to   { transform: translateX(0);    opacity: 1; }
+}
+
+@keyframes pulse {
+  0%, 100% { transform: scale(0.85); }
+  50%       { transform: scale(1.10); }
+}

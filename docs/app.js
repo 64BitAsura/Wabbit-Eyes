@@ -41,10 +41,19 @@
   const fpsEl = document.getElementById('fps-counter');
   const vesselCountEl = document.getElementById('vessel-count');
   const streamStatusEl = document.getElementById('stream-status');
+  const intelStatusEl = document.getElementById('intel-status');
+  const classificationHudEl = document.getElementById('classification-hud');
+  const hudNormalEl = document.getElementById('hud-normal');
+  const hudAnomalyEl = document.getElementById('hud-anomaly');
+  const hudWarmingEl = document.getElementById('hud-warming');
   const tooltipEl = document.getElementById('tooltip');
+  const anomalyFeedEl = document.getElementById('anomaly-feed');
+  const anomalyFeedListEl = document.getElementById('anomaly-feed-list');
   const toggleTrails = document.getElementById('toggle-trails');
   const toggleGrid = document.getElementById('toggle-grid');
   const toggleDemo = document.getElementById('toggle-demo');
+  const toggleFeed = document.getElementById('toggle-feed');
+  const toggleHeatmap = document.getElementById('toggle-heatmap');
 
   // --------------- Three.js setup ---------------
   const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: false });
@@ -213,6 +222,33 @@
   glowMesh.frustumCulled = false;
   scene.add(glowMesh);
 
+  // Anomaly ring (pulsing, classification-colored)
+  const anomalyRingGeometry = new THREE.RingGeometry(1.4, 2.8, 16);
+  const anomalyRingMaterial = new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.85 });
+  const anomalyRingMesh = new THREE.InstancedMesh(anomalyRingGeometry, anomalyRingMaterial, MAX_VESSELS);
+  anomalyRingMesh.count = 0;
+  anomalyRingMesh.frustumCulled = false;
+  scene.add(anomalyRingMesh);
+
+  // Anomaly heatmap points
+  const heatPositions = new Float32Array(MAX_VESSELS * 3);
+  const heatColors = new Float32Array(MAX_VESSELS * 3);
+  const heatGeo = new THREE.BufferGeometry();
+  heatGeo.setAttribute('position', new THREE.BufferAttribute(heatPositions, 3));
+  heatGeo.setAttribute('color', new THREE.BufferAttribute(heatColors, 3));
+  const heatMat = new THREE.PointsMaterial({
+    size: 4,
+    vertexColors: true,
+    transparent: true,
+    opacity: 0.55,
+    blending: THREE.AdditiveBlending,
+    depthWrite: false,
+    sizeAttenuation: false,
+  });
+  const anomalyHeatMesh = new THREE.Points(heatGeo, heatMat);
+  anomalyHeatMesh.frustumCulled = false;
+  scene.add(anomalyHeatMesh);
+
   // --------------- Trail Layer ---------------
   const trailGroup = new THREE.Group();
   scene.add(trailGroup);
@@ -220,7 +256,21 @@
   // --------------- Data Store ---------------
   const vessels = new Map(); // id -> vessel data
   const trailLines = new Map(); // id -> { line, buffer, len }
+  const mmsiToId = new Map(); // mmsi -> vessel id (for classification lookup)
   let trailsDirty = false; // only rebuild trails when new data arrives
+
+  // Classification summary counts
+  const classStats = { NORMAL: 0, ANOMALY: 0, WARMING: 0 };
+
+  // Anomaly label colors (Three.js Color)
+  const ANOMALY_COLORS = {
+    velocity_spike:    new THREE.Color(0xe040fb),
+    heading_deviation: new THREE.Color(0xff6d00),
+    route_digression:  new THREE.Color(0xff1744),
+    stop:              new THREE.Color(0xffca28),
+    regime_change:     new THREE.Color(0xaa00ff),
+  };
+  const ANOMALY_COLOR_DEFAULT = new THREE.Color(0xe040fb);
 
   function getVesselColor(type) {
     return COLORS.vessel[type] || COLORS.vessel.default;
@@ -237,8 +287,14 @@
           type: obj.type || 'cargo',
           mmsi: obj.mmsi || '',
           trail: [],
+          classification: null,
+          confidence: 0,
+          label: null,
+          anomalousFields: [],
+          classifiedAt: 0,
         };
         vessels.set(obj.id, existing);
+        if (obj.mmsi) mmsiToId.set(obj.mmsi, obj.id);
       }
       existing.longitude = obj.longitude;
       existing.latitude = obj.latitude;
@@ -258,12 +314,104 @@
     vesselCountEl.textContent = `${vessels.size} vessels`;
   }
 
+  // --------------- Classification events ---------------
+  function processClassification(event) {
+    const id = mmsiToId.get(event.mmsi);
+    if (!id) return;
+    const v = vessels.get(id);
+    if (!v) return;
+
+    const prev = v.classification;
+    v.classification = event.classification;
+    v.confidence = event.confidence || 0;
+    v.label = event.label || null;
+    v.anomalousFields = event.anomalous_fields || [];
+    v.classifiedAt = Date.now();
+
+    // Update stats
+    if (prev && classStats[prev] !== undefined) classStats[prev]--;
+    if (classStats[v.classification] !== undefined) classStats[v.classification]++;
+    updateClassHUD();
+
+    if (v.classification === 'ANOMALY') {
+      addFeedEntry(v, event);
+    }
+  }
+
+  function updateClassHUD() {
+    const hasData = classStats.NORMAL + classStats.ANOMALY + classStats.WARMING > 0;
+    if (hasData) classificationHudEl.classList.remove('hidden');
+    hudNormalEl.textContent = classStats.NORMAL;
+    hudAnomalyEl.textContent = classStats.ANOMALY;
+    hudWarmingEl.textContent = classStats.WARMING;
+  }
+
+  // --------------- Anomaly Feed ---------------
+  const MAX_FEED_ENTRIES = 20;
+
+  function addFeedEntry(vessel, event) {
+    const now = Date.now();
+    const label = event.label || 'unknown';
+    const conf = Math.round((event.confidence || 0) * 100);
+    const fillW = Math.round((event.confidence || 0) * 36);
+
+    const el = document.createElement('div');
+    el.className = 'feed-entry';
+    el.dataset.id = vessel.id;
+    el.innerHTML =
+      `<span class="feed-dot dot-${label}"></span>` +
+      `<span class="feed-vessel-id">${vessel.id}</span>` +
+      `<span class="label-chip chip-${label}">${label.replace(/_/g, ' ')}</span>` +
+      `<span class="confidence-bar"><span class="confidence-fill" style="width:${fillW}px"></span></span>` +
+      `<span class="feed-time" data-ts="${now}">0s ago</span>`;
+
+    el.addEventListener('click', () => {
+      const v = vessels.get(vessel.id);
+      if (v) {
+        panOffset.x = v.longitude;
+        panOffset.y = v.latitude;
+        zoomLevel = 2.5;
+        updateCamera();
+      }
+    });
+
+    anomalyFeedListEl.insertBefore(el, anomalyFeedListEl.firstChild);
+    while (anomalyFeedListEl.children.length > MAX_FEED_ENTRIES) {
+      anomalyFeedListEl.removeChild(anomalyFeedListEl.lastChild);
+    }
+  }
+
+  // Update relative timestamps in feed every second
+  setInterval(() => {
+    const now = Date.now();
+    anomalyFeedListEl.querySelectorAll('.feed-time').forEach(el => {
+      const ts = parseInt(el.dataset.ts, 10);
+      const secs = Math.floor((now - ts) / 1000);
+      el.textContent = secs < 60 ? `${secs}s ago` : `${Math.floor(secs / 60)}m ago`;
+    });
+  }, 1000);
+
+  // Toggle feed visibility
+  if (toggleFeed) {
+    toggleFeed.addEventListener('change', () => {
+      if (toggleFeed.checked) {
+        anomalyFeedEl.classList.remove('hidden');
+      } else {
+        anomalyFeedEl.classList.add('hidden');
+      }
+    });
+    // Start visible (matches checked default)
+    anomalyFeedEl.classList.remove('hidden');
+  }
+
   // --------------- Render loop helpers ---------------
   const dummy = new THREE.Object3D();
   const tempColor = new THREE.Color();
 
   function updateInstancedMeshes() {
     let i = 0;
+    let ri = 0;
+    const now = performance.now();
     vessels.forEach(v => {
       if (i >= MAX_VESSELS) return;
       dummy.position.set(v.longitude, v.latitude, 1);
@@ -276,13 +424,57 @@
       tempColor.copy(col).multiplyScalar(0.5);
       glowMesh.setColorAt(i, tempColor);
       i++;
+
+      // Anomaly ring pass
+      if (v.classification === 'ANOMALY' && ri < MAX_VESSELS) {
+        const elapsed = now - (v.classifiedAt || 0);
+        const scale = 0.85 + 0.25 * Math.sin(elapsed / 400);
+        dummy.position.set(v.longitude, v.latitude, 1.5);
+        dummy.scale.set(scale, scale, scale);
+        dummy.updateMatrix();
+        anomalyRingMesh.setMatrixAt(ri, dummy.matrix);
+        const acol = ANOMALY_COLORS[v.label] || ANOMALY_COLOR_DEFAULT;
+        anomalyRingMesh.setColorAt(ri, acol);
+        ri++;
+      }
     });
+    // Reset dummy scale
+    dummy.scale.set(1, 1, 1);
     vesselMesh.count = i;
     glowMesh.count = i;
+    anomalyRingMesh.count = ri;
     vesselMesh.instanceMatrix.needsUpdate = true;
     glowMesh.instanceMatrix.needsUpdate = true;
+    anomalyRingMesh.instanceMatrix.needsUpdate = true;
     if (vesselMesh.instanceColor) vesselMesh.instanceColor.needsUpdate = true;
     if (glowMesh.instanceColor) glowMesh.instanceColor.needsUpdate = true;
+    if (anomalyRingMesh.instanceColor) anomalyRingMesh.instanceColor.needsUpdate = true;
+  }
+
+  function updateHeatmap() {
+    const showHeatmap = toggleHeatmap && toggleHeatmap.checked;
+    anomalyHeatMesh.visible = showHeatmap;
+    if (!showHeatmap) return;
+
+    const posAttr = heatGeo.getAttribute('position');
+    const colAttr = heatGeo.getAttribute('color');
+    const now = Date.now();
+    const FADE_MS = 120000;
+    let hi = 0;
+
+    vessels.forEach(v => {
+      if (v.classification !== 'ANOMALY' || hi >= MAX_VESSELS) return;
+      const age = now - (v.classifiedAt || 0);
+      if (age > FADE_MS) return;
+      const alpha = 1 - age / FADE_MS;
+      const acol = ANOMALY_COLORS[v.label] || ANOMALY_COLOR_DEFAULT;
+      posAttr.setXYZ(hi, v.longitude, v.latitude, 2);
+      colAttr.setXYZ(hi, acol.r * alpha, acol.g * alpha, acol.b * alpha);
+      hi++;
+    });
+    heatGeo.setDrawRange(0, hi);
+    posAttr.needsUpdate = true;
+    colAttr.needsUpdate = true;
   }
 
   function updateTrails() {
@@ -384,13 +576,21 @@
       tooltipEl.style.top = (event.clientY - 10) + 'px';
       const latHemi = closest.latitude >= 0 ? 'N' : 'S';
       const lngHemi = closest.longitude >= 0 ? 'E' : 'W';
-      tooltipEl.textContent =
+      let tip =
         `${closest.id}  [${closest.type.toUpperCase()}]\n` +
         `MMSI: ${closest.mmsi}\n` +
         `Pos:  ${Math.abs(closest.latitude).toFixed(4)}°${latHemi}  ${Math.abs(closest.longitude).toFixed(4)}°${lngHemi}\n` +
         `Vel:  ${closest.velocity.toFixed(1)} kn\n` +
         `Dir:  ${closest.direction.toFixed(1)}°\n` +
         `Elev: ${closest.elevation.toFixed(1)} m`;
+      if (closest.classification) {
+        tip +=
+          `\n── INTEL ──────────────────\n` +
+          `Status: ${closest.classification}  [${closest.confidence.toFixed(2)}]\n` +
+          `Label:  ${closest.label || '—'}\n` +
+          `Fields: ${(closest.anomalousFields || []).join(', ') || '—'}`;
+      }
+      tooltipEl.textContent = tip;
     } else {
       tooltipEl.classList.add('hidden');
     }
@@ -416,6 +616,7 @@
     requestAnimationFrame(animate);
     updateInstancedMeshes();
     updateTrails();
+    updateHeatmap();
     gridGroup.visible = toggleGrid.checked;
     renderer.render(scene, camera);
     updateFPS();
@@ -424,6 +625,7 @@
 
   // --------------- Streaming Connection ---------------
   let eventSource = null;
+  let classifiedSource = null;
   let demoMode = false;
 
   function connectStream(url) {
@@ -463,6 +665,37 @@
     };
   }
 
+  function connectClassifiedStream(url) {
+    if (classifiedSource) {
+      classifiedSource.close();
+      classifiedSource = null;
+    }
+
+    intelStatusEl.textContent = 'INTEL …';
+    intelStatusEl.className = 'disconnected';
+
+    classifiedSource = new EventSource(url);
+
+    classifiedSource.onopen = () => {
+      intelStatusEl.textContent = 'INTEL LIVE';
+      intelStatusEl.className = 'connected';
+    };
+
+    classifiedSource.onmessage = (evt) => {
+      try {
+        const event = JSON.parse(evt.data);
+        processClassification(event);
+      } catch (e) {
+        // ignore parse errors
+      }
+    };
+
+    classifiedSource.onerror = () => {
+      intelStatusEl.textContent = 'INTEL OFF';
+      intelStatusEl.className = 'disconnected';
+    };
+  }
+
   function startDemoMode() {
     if (demoMode) return;
     demoMode = true;
@@ -471,16 +704,25 @@
       eventSource.close();
       eventSource = null;
     }
+    if (classifiedSource) {
+      classifiedSource.close();
+      classifiedSource = null;
+    }
     streamStatusEl.textContent = 'DEMO';
     streamStatusEl.className = 'connected';
-    MockClient.start((data) => {
-      processData(data);
-    });
+    intelStatusEl.textContent = 'INTEL DEMO';
+    intelStatusEl.className = 'connected';
+    MockClient.start(
+      (data) => { processData(data); },
+      (event) => { processClassification(event); }
+    );
   }
 
   function stopDemoMode() {
     demoMode = false;
     MockClient.stop();
+    intelStatusEl.textContent = 'INTEL OFF';
+    intelStatusEl.className = 'disconnected';
   }
 
   // Toggle demo mode
@@ -506,9 +748,9 @@
       return;
     }
 
-    // Try connecting to same-origin /stream
-    const streamUrl = `${window.location.origin}/stream`;
-    connectStream(streamUrl);
+    // Try connecting to same-origin /stream and /classified
+    connectStream(`${window.location.origin}/stream`);
+    connectClassifiedStream(`${window.location.origin}/classified`);
   }
 
   tryConnect();

@@ -5,7 +5,9 @@ Uses Kafkar/NMEA_Simulator (vendored in nmea_simulator/) to generate realistic
 NMEA sentences for 1000 shipping vessels travelling between major trade ports.
 
 Replaces the original Node.js mock server with NMEA_Simulator-powered data.
-Serves SSE at /stream and static files from docs/.
+Serves SSE at /stream, /classified and static files from docs/.
+Optionally broadcasts vessel data over WebSocket (WS_PORT) and publishes to
+NATS when NATS_URL is set.
 """
 
 import os
@@ -14,7 +16,9 @@ import json
 import math
 import time
 import random
+import asyncio
 import threading
+from collections import deque
 from datetime import datetime, timezone
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
@@ -25,6 +29,8 @@ from nmea_simulator import GPRMC, VHW, TrackManager
 
 # --------------- Configuration ---------------
 PORT = int(os.environ.get('PORT', 3000))
+WS_PORT = int(os.environ.get('WS_PORT', 3001))
+NATS_URL = os.environ.get('NATS_URL', '')   # e.g. "nats://localhost:4222"
 VESSEL_COUNT = 1000
 EMIT_INTERVAL_MS = 200
 TIME_SCALE = 3000
@@ -231,6 +237,9 @@ class VesselSimulator:
         self.latitude = 0.0
         self.longitude = 0.0
         self.direction = 0.0
+        # Anomaly fields (set by AnomalyInjector)
+        self.anomaly_type = None
+        self.anomaly_confidence = 0.0
         self._update_speed()
         self._update_position()
 
@@ -325,6 +334,9 @@ class VesselSimulator:
             'velocity': round(self.velocity, 2),
             'direction': round(self.direction, 2),
             'timestamp': int(time.time() * 1000),
+            'nmea': getattr(self, 'last_nmea', ''),
+            'anomaly_type': self.anomaly_type,
+            'anomaly_confidence': round(self.anomaly_confidence, 4),
         }
 
 
@@ -337,6 +349,9 @@ class FleetSimulator:
         self.fleet = fleet
         self.running = False
         self.lock = threading.Lock()
+        self.anomaly_injector = None
+        self.ws_broadcaster = None
+        self.nats_publisher = None
 
     def start(self):
         self.running = True
@@ -349,6 +364,8 @@ class FleetSimulator:
             with self.lock:
                 for v in self.fleet:
                     v.tick()
+                if self.anomaly_injector:
+                    self.anomaly_injector.tick()
             time.sleep(interval)
 
     def get_all_json(self):
@@ -362,6 +379,221 @@ class FleetSimulator:
 
     def stop(self):
         self.running = False
+
+
+# --------------- Anomaly Injector ---------------
+
+ANOMALY_TYPES = ['velocity_spike', 'heading_deviation', 'route_digression', 'stop']
+
+ANOMALY_FIELDS = {
+    'velocity_spike':    ['velocity'],
+    'heading_deviation': ['direction'],
+    'route_digression':  ['latitude', 'longitude'],
+    'stop':              ['velocity'],
+}
+
+
+class AnomalyInjector:
+    """
+    Randomly injects anomaly state into fleet vessels and emits classification
+    events into a thread-safe deque consumed by the /classified SSE endpoint.
+    Runs in the same thread as the fleet tick (called from FleetSimulator._loop).
+    """
+
+    def __init__(self, fleet):
+        self.fleet = fleet
+        # Maps vessel id -> (anomaly_type, expiry_monotonic)
+        self._active = {}
+        self._next_inject = time.monotonic() + 5.0  # 5 s warmup
+        # Classification event queue for the /classified SSE handler
+        self.events = deque(maxlen=500)
+        self._lock = threading.Lock()
+
+    def tick(self):
+        now = time.monotonic()
+
+        # Expire old anomalies
+        expired = [vid for vid, (_, exp) in self._active.items() if now >= exp]
+        for vid in expired:
+            vessel = next((v for v in self.fleet if v.id == vid), None)
+            if vessel:
+                vessel.anomaly_type = None
+                vessel.anomaly_confidence = 0.0
+                # Emit NORMAL classification event
+                self._emit(vessel, 'NORMAL', 0.0, None, [])
+            del self._active[vid]
+
+        # Inject new anomalies periodically
+        if now >= self._next_inject:
+            self._next_inject = now + random.uniform(5.0, 15.0)
+            count = random.randint(2, 5)
+            candidates = [v for v in self.fleet if v.id not in self._active]
+            if candidates:
+                for vessel in random.sample(candidates, min(count, len(candidates))):
+                    atype = random.choice(ANOMALY_TYPES)
+                    duration = random.uniform(30.0, 90.0)
+                    confidence = round(random.uniform(0.75, 0.99), 4)
+                    vessel.anomaly_type = atype
+                    vessel.anomaly_confidence = confidence
+                    self._active[vessel.id] = (atype, now + duration)
+                    self._emit(vessel, 'ANOMALY', confidence, atype, ANOMALY_FIELDS[atype])
+
+    def _emit(self, vessel, classification, confidence, label, anomalous_fields):
+        event = {
+            'mmsi': vessel.mmsi,
+            'id': vessel.id,
+            'classification': classification,
+            'confidence': confidence,
+            'label': label,
+            'anomalous_fields': anomalous_fields,
+            'phase': 1,
+            'timestamp': int(time.time() * 1000),
+        }
+        with self._lock:
+            self.events.append(event)
+
+    def pop_events(self):
+        """Return and clear all pending classification events (thread-safe)."""
+        with self._lock:
+            batch = list(self.events)
+            self.events.clear()
+        return batch
+
+
+# --------------- WebSocket Broadcaster ---------------
+
+class WSBroadcaster:
+    """
+    Broadcasts vessel fleet data over WebSocket on WS_PORT.
+    Runs an asyncio event loop in a dedicated daemon thread.
+    """
+
+    def __init__(self, fleet_simulator):
+        self._fleet = fleet_simulator
+        self._clients = set()
+        self._loop = None
+        self._enabled = False
+
+    def start(self):
+        try:
+            import websockets  # noqa: F401
+        except ImportError:
+            print("   [WSBroadcaster] 'websockets' package not installed — WS disabled.")
+            return
+        self._enabled = True
+        t = threading.Thread(target=self._run_loop, daemon=True)
+        t.start()
+
+    def _run_loop(self):
+        self._loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(self._loop)
+        self._loop.run_until_complete(self._serve())
+
+    async def _serve(self):
+        import websockets
+
+        async def handler(ws):
+            self._clients.add(ws)
+            try:
+                # Send initial full fleet
+                data = json.dumps(self._fleet.get_all_json())
+                await ws.send(data)
+                await ws.wait_closed()
+            finally:
+                self._clients.discard(ws)
+
+        print(f"   [WSBroadcaster] WebSocket server on ws://localhost:{WS_PORT}")
+        async with websockets.serve(handler, '', WS_PORT):
+            await asyncio.Future()  # run forever
+
+    def broadcast(self, batch_json):
+        """Called from the fleet tick thread to push a batch to all WS clients."""
+        if not self._enabled or not self._loop or not self._clients:
+            return
+        payload = json.dumps(batch_json)
+        clients = list(self._clients)
+
+        async def _send_all():
+            import websockets
+            for ws in clients:
+                try:
+                    await ws.send(payload)
+                except websockets.exceptions.ConnectionClosed:
+                    self._clients.discard(ws)
+
+        asyncio.run_coroutine_threadsafe(_send_all(), self._loop)
+
+
+# --------------- NATS Publisher ---------------
+
+class NATSPublisher:
+    """
+    Publishes vessel data to NATS when NATS_URL is configured.
+    Activated only when the NATS_URL environment variable is set.
+    Also subscribes to pattern.classified.> and forwards events to
+    the supplied classification_callback.
+    """
+
+    def __init__(self, classification_callback=None):
+        self._nc = None
+        self._loop = None
+        self._enabled = bool(NATS_URL)
+        self._classification_callback = classification_callback
+
+    def start(self):
+        if not self._enabled:
+            return
+        try:
+            import nats  # noqa: F401
+        except ImportError:
+            print("   [NATSPublisher] 'nats-py' package not installed — NATS disabled.")
+            self._enabled = False
+            return
+        t = threading.Thread(target=self._run_loop, daemon=True)
+        t.start()
+
+    def _run_loop(self):
+        self._loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(self._loop)
+        self._loop.run_until_complete(self._connect())
+
+    async def _connect(self):
+        import nats
+        try:
+            self._nc = await nats.connect(NATS_URL)
+            print(f"   [NATSPublisher] Connected to {NATS_URL}")
+            if self._classification_callback:
+                await self._nc.subscribe(
+                    'pattern.classified.>',
+                    cb=self._on_classified
+                )
+            await asyncio.Future()
+        except Exception as exc:
+            print(f"   [NATSPublisher] Connection failed: {exc} — NATS disabled.")
+            self._enabled = False
+
+    async def _on_classified(self, msg):
+        try:
+            event = json.loads(msg.data.decode())
+            if self._classification_callback:
+                self._classification_callback(event)
+        except Exception:
+            pass
+
+    def publish_batch(self, batch_json):
+        """Publish each vessel in the batch to pattern.monitor.vessel.{mmsi}."""
+        if not self._enabled or not self._nc or not self._loop:
+            return
+
+        async def _pub():
+            for vessel in batch_json:
+                try:
+                    subject = f"pattern.monitor.vessel.{vessel['mmsi']}"
+                    await self._nc.publish(subject, json.dumps(vessel).encode())
+                except Exception:
+                    pass
+
+        asyncio.run_coroutine_threadsafe(_pub(), self._loop)
 
 
 # --------------- HTTP / SSE Server ---------------
@@ -381,10 +613,18 @@ MIME_TYPES = {
 
 # Global fleet simulator (set in main)
 simulator = None
+# Global NATS classification event queue (populated by NATSPublisher callback)
+_nats_classified_events = deque(maxlen=500)
+_nats_classified_lock = threading.Lock()
+
+
+def _nats_classification_callback(event):
+    with _nats_classified_lock:
+        _nats_classified_events.append(event)
 
 
 class SSEHandler(BaseHTTPRequestHandler):
-    """HTTP handler serving SSE stream and static files."""
+    """HTTP handler serving SSE stream, /classified SSE, and static files."""
 
     def do_OPTIONS(self):
         self.send_response(204)
@@ -394,6 +634,8 @@ class SSEHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path == '/stream':
             self._handle_stream()
+        elif self.path == '/classified':
+            self._handle_classified()
         else:
             self._serve_static()
 
@@ -412,18 +654,62 @@ class SSEHandler(BaseHTTPRequestHandler):
 
         try:
             # Initial batch – all vessels
-            data = json.dumps(simulator.get_all_json())
+            all_json = simulator.get_all_json()
+            data = json.dumps(all_json)
             self.wfile.write(f"data: {data}\n\n".encode())
             self.wfile.flush()
+
+            if simulator.ws_broadcaster:
+                simulator.ws_broadcaster.broadcast(all_json)
+            if simulator.nats_publisher:
+                simulator.nats_publisher.publish_batch(all_json)
 
             # Periodic updates
             interval = EMIT_INTERVAL_MS / 1000.0
             while True:
                 time.sleep(interval)
                 batch_size = 50 + random.randint(0, 50)
-                data = json.dumps(simulator.get_batch_json(batch_size))
+                batch_json = simulator.get_batch_json(batch_size)
+                data = json.dumps(batch_json)
                 self.wfile.write(f"data: {data}\n\n".encode())
                 self.wfile.flush()
+
+                if simulator.ws_broadcaster:
+                    simulator.ws_broadcaster.broadcast(batch_json)
+                if simulator.nats_publisher:
+                    simulator.nats_publisher.publish_batch(batch_json)
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError, OSError):
+            pass
+
+    def _handle_classified(self):
+        """
+        SSE endpoint that streams classification events.
+        In standalone mode (no NATS_URL): drains AnomalyInjector.events.
+        When NATS_URL is set: drains the _nats_classified_events deque
+        populated by NATSPublisher's subscription to pattern.classified.>.
+        """
+        self.send_response(200)
+        self.send_header('Content-Type', 'text/event-stream')
+        self.send_header('Cache-Control', 'no-cache')
+        self.send_header('Connection', 'keep-alive')
+        self._cors_headers()
+        self.end_headers()
+
+        poll_interval = 0.1  # 100 ms polling
+        try:
+            while True:
+                if NATS_URL:
+                    with _nats_classified_lock:
+                        events = list(_nats_classified_events)
+                        _nats_classified_events.clear()
+                else:
+                    events = (simulator.anomaly_injector.pop_events()
+                              if simulator.anomaly_injector else [])
+                for event in events:
+                    data = json.dumps(event)
+                    self.wfile.write(f"data: {data}\n\n".encode())
+                self.wfile.flush()
+                time.sleep(poll_interval)
         except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError, OSError):
             pass
 
@@ -467,15 +753,33 @@ def main():
           f"{len(TRADE_PORTS)} major trade ports")
 
     simulator = FleetSimulator(fleet)
+
+    # Wire anomaly injector (standalone classification source)
+    simulator.anomaly_injector = AnomalyInjector(fleet)
+
+    # Wire optional WebSocket broadcaster
+    ws = WSBroadcaster(simulator)
+    ws.start()
+    simulator.ws_broadcaster = ws
+
+    # Wire optional NATS publisher / classified subscriber
+    nats_pub = NATSPublisher(classification_callback=_nats_classification_callback)
+    nats_pub.start()
+    simulator.nats_publisher = nats_pub
+
     simulator.start()
 
     server = HTTPServer(('', PORT), SSEHandler)
     server.daemon_threads = True
 
     print(f"🚢 Wabbit-Eyes NMEA server running at http://localhost:{PORT}")
-    print(f"   Stream endpoint: http://localhost:{PORT}/stream")
+    print(f"   Stream endpoint:     http://localhost:{PORT}/stream")
+    print(f"   Classified endpoint: http://localhost:{PORT}/classified")
+    print(f"   WebSocket endpoint:  ws://localhost:{WS_PORT}")
     print(f"   Serving UI from {DOCS_DIR}")
     print(f"   Powered by NMEA_Simulator (github.com/Kafkar/NMEA_Simulator)")
+    if NATS_URL:
+        print(f"   NATS: {NATS_URL}")
 
     try:
         server.serve_forever()

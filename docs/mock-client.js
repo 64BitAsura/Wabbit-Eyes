@@ -292,9 +292,81 @@ const MockClient = (() => {
     }
   }
 
-  function start(callback) {
+  // --------------- MockClassifier ---------------
+
+  const MOCK_ANOMALY_TYPES = ['velocity_spike', 'heading_deviation', 'route_digression', 'stop'];
+  const MOCK_ANOMALY_FIELDS = {
+    velocity_spike:    ['velocity'],
+    heading_deviation: ['direction'],
+    route_digression:  ['latitude', 'longitude'],
+    stop:              ['velocity'],
+  };
+
+  const MockClassifier = (() => {
+    let _active = {};  // id -> { type, expiry, mmsi }
+    let _nextInject = Date.now() + 5000;
+    let _classificationCb = null;
+
+    function tick() {
+      const now = Date.now();
+
+      // Expire anomalies
+      Object.keys(_active).forEach(id => {
+        if (now >= _active[id].expiry) {
+          const entry = _active[id];
+          if (_classificationCb) {
+            _classificationCb({
+              mmsi: entry.mmsi,
+              id,
+              classification: 'NORMAL',
+              confidence: 0,
+              label: null,
+              anomalous_fields: [],
+              phase: 0,
+              timestamp: now,
+            });
+          }
+          delete _active[id];
+        }
+      });
+
+      // Inject new anomalies
+      if (now >= _nextInject) {
+        _nextInject = now + 5000 + Math.random() * 10000;
+        const count = 2 + Math.floor(Math.random() * 4);
+        const available = fleet.filter(v => !_active[v.id]);
+        const chosen = available.sort(() => Math.random() - 0.5).slice(0, count);
+        chosen.forEach(vessel => {
+          const atype = MOCK_ANOMALY_TYPES[Math.floor(Math.random() * MOCK_ANOMALY_TYPES.length)];
+          const duration = 30000 + Math.random() * 60000;
+          const confidence = parseFloat((0.75 + Math.random() * 0.24).toFixed(4));
+          _active[vessel.id] = { type: atype, expiry: now + duration, mmsi: vessel.mmsi };
+          if (_classificationCb) {
+            _classificationCb({
+              mmsi: vessel.mmsi,
+              id: vessel.id,
+              classification: 'ANOMALY',
+              confidence,
+              label: atype,
+              anomalous_fields: MOCK_ANOMALY_FIELDS[atype],
+              phase: 1,
+              timestamp: now,
+            });
+          }
+        });
+      }
+    }
+
+    function setCallback(fn) { _classificationCb = fn; }
+    function reset() { _active = {}; _nextInject = Date.now() + 5000; }
+
+    return { tick, setCallback, reset };
+  })();
+
+  function start(callback, classificationCallback) {
     if (intervalId) stop();
     onDataCallback = callback;
+    if (classificationCallback) MockClassifier.setCallback(classificationCallback);
     init();
     // Send initial batch
     if (onDataCallback) {
@@ -302,6 +374,7 @@ const MockClient = (() => {
     }
     intervalId = setInterval(() => {
       fleet.forEach(v => v.tick());
+      MockClassifier.tick();
       const batchSize = 50 + Math.floor(Math.random() * 50);
       const indices = new Set();
       while (indices.size < batchSize) {
@@ -312,12 +385,17 @@ const MockClient = (() => {
     }, EMIT_INTERVAL_MS);
   }
 
+  function onClassification(fn) {
+    MockClassifier.setCallback(fn);
+  }
+
   function stop() {
     if (intervalId) {
       clearInterval(intervalId);
       intervalId = null;
     }
+    MockClassifier.reset();
   }
 
-  return { start, stop };
+  return { start, stop, onClassification };
 })();

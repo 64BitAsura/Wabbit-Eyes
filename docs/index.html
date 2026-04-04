@@ -14,9 +14,19 @@
         <span id="fps-counter">60 FPS</span>
         <span id="vessel-count">0 vessels</span>
         <span id="stream-status" class="disconnected">OFFLINE</span>
+        <span id="intel-status" class="disconnected">INTEL OFF</span>
       </div>
     </div>
+    <div id="classification-hud" class="hidden">
+      <span class="hud-item normal-count">NORMAL: <strong id="hud-normal">0</strong></span>
+      <span class="hud-item anomaly-count">ANOMALY: <strong id="hud-anomaly">0</strong></span>
+      <span class="hud-item warming-count">WARMING: <strong id="hud-warming">0</strong></span>
+    </div>
     <div id="tooltip" class="hidden"></div>
+    <div id="anomaly-feed" class="hidden">
+      <div id="anomaly-feed-header">ANOMALY FEED</div>
+      <div id="anomaly-feed-list"></div>
+    </div>
     <div id="controls">
       <label title="Toggle vessel trails">
         <input type="checkbox" id="toggle-trails" checked /> Trails
@@ -26,6 +36,12 @@
       </label>
       <label title="Toggle demo mode (client-side mock data)">
         <input type="checkbox" id="toggle-demo" /> Demo Mode
+      </label>
+      <label title="Toggle anomaly event feed panel">
+        <input type="checkbox" id="toggle-feed" checked /> Feed
+      </label>
+      <label title="Toggle anomaly heatmap overlay">
+        <input type="checkbox" id="toggle-heatmap" /> Heatmap
       </label>
     </div>
   </div>

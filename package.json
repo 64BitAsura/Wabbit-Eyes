@@ -6,7 +6,9 @@
   "scripts": {
     "start": "python3 server/nmea_server.py",
     "server": "python3 server/nmea_server.py",
-    "server:node": "node server/index.js"
+    "server:node": "node server/index.js",
+    "server:ws": "WS_PORT=3001 python3 server/nmea_server.py",
+    "server:nats": "NATS_URL=nats://localhost:4222 python3 server/nmea_server.py"
   },
   "keywords": [
     "threejs",

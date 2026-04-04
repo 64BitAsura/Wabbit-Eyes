@@ -1,0 +1,104 @@
+apiVersion: core.oam.dev/v1beta1
+kind: Application
+metadata:
+  name: wabbit-eyes-pipeline
+  annotations:
+    description: >
+      Wabbit Eyes vessel-pattern classification pipeline.
+      Connects the NMEA vessel stream (via WebSocket) through wasmCloud
+      pattern-encoder and pattern-classifier components, then publishes
+      classifications back over NATS for the server to relay to browsers.
+spec:
+  components:
+
+    # ---------- WebSocket ingress provider ----------
+    - name: websocket-provider
+      type: capability
+      properties:
+        image: ghcr.io/wasmcloud/websocket-provider:latest
+        config:
+          - name: ws-config
+            properties:
+              websocket_url: "ws://localhost:3001"
+              nats_subject: "pattern.monitor.vessel.stream"
+
+    # ---------- NATS messaging capability ----------
+    - name: nats-messaging
+      type: capability
+      properties:
+        image: ghcr.io/wasmcloud/messaging-nats:latest
+        config:
+          - name: nats-config
+            properties:
+              cluster_uris: "nats://127.0.0.1:4222"
+
+    # ---------- Redis key-value capability ----------
+    - name: redis-keyvalue
+      type: capability
+      properties:
+        image: ghcr.io/wasmcloud/keyvalue-redis:latest
+        config:
+          - name: redis-config
+            properties:
+              url: "redis://127.0.0.1:6379"
+
+    # ---------- VSA Pattern Encoder ----------
+    - name: pattern-encoder
+      type: component
+      properties:
+        image: ghcr.io/64bitasura/wabbit-pattern-encoder:latest
+      traits:
+        - type: spreadscaler
+          properties:
+            instances: 1
+        - type: link
+          properties:
+            target:
+              name: nats-messaging
+            namespace: wasmcloud
+            package: messaging
+            interfaces: [consumer, handler]
+            source:
+              config:
+                - name: encoder-nats-sub
+                  properties:
+                    subscriptions: "pattern.monitor.vessel.stream"
+        - type: link
+          properties:
+            target:
+              name: redis-keyvalue
+            namespace: wasmcloud
+            package: keyvalue
+            interfaces: [atomics, store]
+
+    # ---------- VSA Pattern Classifier ----------
+    - name: pattern-classifier
+      type: component
+      properties:
+        image: ghcr.io/64bitasura/wabbit-pattern-classifier:latest
+      traits:
+        - type: spreadscaler
+          properties:
+            instances: 1
+        - type: link
+          properties:
+            target:
+              name: nats-messaging
+            namespace: wasmcloud
+            package: messaging
+            interfaces: [consumer, handler]
+            source:
+              config:
+                - name: classifier-nats-sub
+                  properties:
+                    # Subscribes to the same raw vessel stream
+                    subscriptions: "pattern.monitor.vessel.stream"
+                    # Publishes classifications to per-MMSI subjects
+                    publish_subject: "pattern.classified.vessel.{mmsi}"
+        - type: link
+          properties:
+            target:
+              name: redis-keyvalue
+            namespace: wasmcloud
+            package: keyvalue
+            interfaces: [atomics, store]
