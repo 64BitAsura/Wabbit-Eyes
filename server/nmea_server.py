@@ -13,6 +13,7 @@ import sys
 import json
 import math
 import time
+import heapq
 import random
 import threading
 from datetime import datetime, timezone
@@ -77,6 +78,252 @@ SPEED_RANGES = {
     'roro':         (15, 20),
     'passenger':    (18, 24),
 }
+
+
+# --------------- Maritime Routing ---------------
+# Ocean routing waypoints: major chokepoints and open-sea nodes used to
+# constrain vessel routes to water-only paths.
+
+MARITIME_WAYPOINTS = {
+    # Atlantic Ocean
+    'atl_n':     {'lat': 45.0,  'lon': -30.0},   # North Atlantic
+    'atl_s':     {'lat': -20.0, 'lon': -22.0},   # South Atlantic
+    # Mediterranean & approaches
+    'gibraltar': {'lat': 36.0,  'lon':  -5.3},   # Strait of Gibraltar
+    'med_w':     {'lat': 38.0,  'lon':   5.0},   # Western Mediterranean
+    'med_e':     {'lat': 33.5,  'lon':  25.0},   # Eastern Mediterranean
+    # Red Sea / Arabian Sea
+    'suez_n':    {'lat': 31.2,  'lon':  32.3},   # Suez Canal (north)
+    'suez_s':    {'lat': 12.6,  'lon':  43.5},   # Bab-el-Mandeb
+    'hormuz':    {'lat': 26.3,  'lon':  57.0},   # Strait of Hormuz
+    # Indian Ocean
+    'ind_nw':    {'lat': 10.0,  'lon':  62.0},   # NW Indian Ocean
+    'ind_sw':    {'lat': -15.0, 'lon':  65.0},   # SW Indian Ocean
+    'ind_se':    {'lat': -20.0, 'lon':  88.0},   # SE Indian Ocean
+    's_afr_e':   {'lat': -26.0, 'lon':  43.0},   # East of South Africa
+    'c_gh':      {'lat': -34.8, 'lon':  17.5},   # Cape of Good Hope
+    # South-East Asia
+    'malacca':   {'lat':  3.5,  'lon': 101.0},   # Strait of Malacca
+    'se_asia':   {'lat': 10.0,  'lon': 112.0},   # South China Sea
+    # East Asia / North-West Pacific
+    'e_china':   {'lat': 28.0,  'lon': 124.0},   # East China Sea
+    'pac_nw':    {'lat': 35.0,  'lon': 152.0},   # NW Pacific
+    # Pacific Ocean
+    'pac_n':     {'lat': 40.0,  'lon': 175.0},   # North Pacific (near date line)
+    'pac_ne':    {'lat': 35.0,  'lon':-145.0},   # NE Pacific
+    'pac_sw':    {'lat': -30.0, 'lon': 175.0},   # SW Pacific
+    'pac_se':    {'lat': -30.0, 'lon':-130.0},   # SE Pacific
+    # Americas
+    'panama_a':  {'lat':  9.3,  'lon': -79.9},   # Panama Canal (Atlantic side)
+    'panama_p':  {'lat':  8.8,  'lon': -79.5},   # Panama Canal (Pacific side)
+    'c_horn':    {'lat': -56.0, 'lon': -65.0},   # Cape Horn
+}
+
+# Bidirectional ocean-safe edges between waypoints.
+# Each pair is a straight-line ocean segment that does not cross land.
+WAYPOINT_EDGES = [
+    # North Atlantic
+    ('atl_n',    'gibraltar'),
+    ('atl_n',    'atl_s'),
+    ('atl_n',    'panama_a'),
+    # South Atlantic
+    ('atl_s',    'panama_a'),
+    ('atl_s',    'c_gh'),
+    ('atl_s',    'c_horn'),
+    # Mediterranean
+    ('gibraltar', 'med_w'),
+    ('med_w',    'med_e'),
+    ('med_e',    'suez_n'),
+    # Red Sea / Arabian Sea
+    ('suez_n',   'suez_s'),
+    ('suez_s',   'ind_nw'),
+    ('suez_s',   'hormuz'),
+    ('hormuz',   'ind_nw'),
+    # Indian Ocean
+    ('ind_nw',   'ind_sw'),
+    ('ind_nw',   'ind_se'),
+    ('ind_sw',   'ind_se'),
+    ('ind_sw',   's_afr_e'),
+    ('ind_sw',   'c_gh'),
+    ('ind_se',   'malacca'),
+    ('ind_se',   'pac_sw'),
+    ('s_afr_e',  'c_gh'),
+    # South-East Asia
+    ('malacca',  'se_asia'),
+    ('se_asia',  'e_china'),
+    ('se_asia',  'pac_sw'),
+    # East Asia / NW Pacific
+    ('e_china',  'pac_nw'),
+    # Pacific
+    ('pac_nw',   'pac_n'),
+    ('pac_nw',   'pac_sw'),
+    ('pac_n',    'pac_ne'),
+    ('pac_n',    'pac_sw'),
+    ('pac_ne',   'panama_p'),
+    ('pac_sw',   'pac_se'),
+    ('pac_se',   'panama_p'),
+    ('pac_se',   'c_horn'),
+    # Panama Canal
+    ('panama_a', 'panama_p'),
+]
+
+# Maps each trade port to its ocean-entry waypoint(s).
+# Multiple entries mean the port can enter the routing graph via any of them;
+# Dijkstra picks the cheapest combination automatically.
+PORT_OCEAN_ACCESS = {
+    'Shanghai':        ['e_china'],
+    'Singapore':       ['malacca', 'se_asia'],
+    'Rotterdam':       ['atl_n'],
+    'Busan':           ['e_china', 'pac_nw'],
+    'Guangzhou':       ['se_asia'],
+    'Qingdao':         ['e_china'],
+    'Hong Kong':       ['se_asia'],
+    'Jebel Ali':       ['hormuz'],
+    'Tianjin':         ['e_china'],
+    'Los Angeles':     ['pac_ne'],
+    'Hamburg':         ['atl_n'],
+    'Antwerp':         ['atl_n'],
+    'Port Klang':      ['malacca'],
+    'Kaohsiung':       ['se_asia'],
+    'Xiamen':          ['se_asia'],
+    'Dalian':          ['e_china'],
+    'New York':        ['atl_n'],
+    'Tanjung Pelepas': ['malacca'],
+    'Laem Chabang':    ['se_asia'],
+    'Tokyo':           ['pac_nw'],
+    'Felixstowe':      ['atl_n'],
+    'Santos':          ['atl_s'],
+    'Colombo':         ['ind_nw'],
+    'Piraeus':         ['med_e'],
+    'Mumbai':          ['ind_nw'],
+    'Durban':          ['s_afr_e'],
+    'Cape Town':       ['c_gh'],
+    'Melbourne':       ['ind_se', 'pac_sw'],
+    'Yokohama':        ['pac_nw'],
+    'Savannah':        ['atl_n'],
+}
+
+
+def _haversine_rad(lat1, lon1, lat2, lon2):
+    """Haversine angular distance in radians between two lat/lon pairs."""
+    lat1, lon1, lat2, lon2 = map(math.radians, [lat1, lon1, lat2, lon2])
+    dlat = lat2 - lat1
+    dlon = lon2 - lon1
+    a = math.sin(dlat / 2) ** 2 + math.cos(lat1) * math.cos(lat2) * math.sin(dlon / 2) ** 2
+    # Clamp to [0, 1] to guard against floating-point values slightly outside the domain of asin
+    return 2 * math.asin(math.sqrt(max(0.0, min(1.0, a))))
+
+
+def _find_maritime_waypoint_path(origin_name, dest_name):
+    """Return the list of intermediate MARITIME_WAYPOINTS dicts on the
+    shortest ocean-safe path between two named trade ports.
+
+    Uses Dijkstra on WAYPOINT_EDGES weighted by great-circle distance.
+    Virtual SRC/DST nodes connect to each port's ocean-entry waypoints with
+    zero cost so multiple access points are handled automatically.
+    Returns an empty list when either port is unknown (caller falls back to
+    the direct great-circle route).
+    """
+    src_wps = PORT_OCEAN_ACCESS.get(origin_name, [])
+    dst_wps = PORT_OCEAN_ACCESS.get(dest_name, [])
+    if not src_wps or not dst_wps:
+        return []
+
+    # Build local adjacency list (fresh each call; small graph, fast enough)
+    adj = {}
+    for a, b in WAYPOINT_EDGES:
+        adj.setdefault(a, []).append(b)
+        adj.setdefault(b, []).append(a)
+
+    SRC, DST = '__src__', '__dst__'
+    adj[SRC] = list(src_wps)
+    for w in dst_wps:
+        adj.setdefault(w, []).append(DST)
+
+    def edge_cost(a, b):
+        if a == SRC or b == DST:
+            return 0.0
+        wa, wb = MARITIME_WAYPOINTS[a], MARITIME_WAYPOINTS[b]
+        return _haversine_rad(wa['lat'], wa['lon'], wb['lat'], wb['lon'])
+
+    heap = [(0.0, SRC, [SRC])]
+    visited = set()
+    while heap:
+        cost, node, path = heapq.heappop(heap)
+        if node in visited:
+            continue
+        visited.add(node)
+        if node == DST:
+            inner = [n for n in path if n not in (SRC, DST)]
+            return [MARITIME_WAYPOINTS[n] for n in inner]
+        for nb in adj.get(node, []):
+            if nb not in visited:
+                heapq.heappush(heap, (cost + edge_cost(node, nb), nb, path + [nb]))
+
+    return []
+
+
+def _gc_segment(lat1, lon1, lat2, lon2, n_points):
+    """Generate n_points evenly spaced along the great circle from
+    (lat1, lon1) to (lat2, lon2).  Returns a list of waypoint dicts."""
+    lat1r, lon1r = math.radians(lat1), math.radians(lon1)
+    lat2r, lon2r = math.radians(lat2), math.radians(lon2)
+    d = _haversine_rad(lat1, lon1, lat2, lon2)
+    if d < 1e-10:
+        return [{'lat': lat1, 'lon': lon1, 'elevation': 0.0, 'timestamp': None}] * max(n_points, 1)
+    pts = []
+    for i in range(n_points):
+        f = i / max(n_points - 1, 1)
+        a = math.sin((1 - f) * d) / math.sin(d)
+        b = math.sin(f * d) / math.sin(d)
+        x = a * math.cos(lat1r) * math.cos(lon1r) + b * math.cos(lat2r) * math.cos(lon2r)
+        y = a * math.cos(lat1r) * math.sin(lon1r) + b * math.cos(lat2r) * math.sin(lon2r)
+        z = a * math.sin(lat1r) + b * math.sin(lat2r)
+        lat = math.degrees(math.atan2(z, math.sqrt(x * x + y * y)))
+        lon = math.degrees(math.atan2(y, x))
+        pts.append({'lat': lat, 'lon': lon, 'elevation': 0.0, 'timestamp': None})
+    return pts
+
+
+def generate_maritime_route(origin, destination, num_points=50):
+    """Generate waypoints along an ocean-only route between two trade ports.
+
+    Finds the shortest path through MARITIME_WAYPOINTS (ocean chokepoints and
+    open-sea nodes) via Dijkstra, then distributes num_points across the
+    resulting multi-segment great-circle path proportionally by segment length.
+    Falls back to a direct great-circle route for unknown ports.
+    """
+    via_wps = _find_maritime_waypoint_path(origin['name'], destination['name'])
+
+    nodes = (
+        [{'lat': origin['lat'],      'lon': origin['lon']}]
+        + via_wps
+        + [{'lat': destination['lat'], 'lon': destination['lon']}]
+    )
+
+    if len(nodes) < 2:
+        return generate_great_circle_waypoints(origin, destination, num_points)
+
+    # Compute per-segment great-circle distances (in radians)
+    seg_dists = [
+        _haversine_rad(nodes[i]['lat'], nodes[i]['lon'],
+                       nodes[i + 1]['lat'], nodes[i + 1]['lon'])
+        for i in range(len(nodes) - 1)
+    ]
+    total_dist = sum(seg_dists) or 1.0
+
+    # Distribute num_points proportionally; guarantee at least 2 per segment
+    budgets = [max(2, round(num_points * d / total_dist)) for d in seg_dists]
+
+    all_points = []
+    for i, (a, b) in enumerate(zip(nodes[:-1], nodes[1:])):
+        seg = _gc_segment(a['lat'], a['lon'], b['lat'], b['lon'], budgets[i])
+        # Drop the first point of every segment after the first to avoid duplicates
+        if all_points:
+            seg = seg[1:]
+        all_points.extend(seg)
+
+    return all_points if all_points else generate_great_circle_waypoints(origin, destination, num_points)
 
 
 # --------------- Great Circle Route Generation ---------------
@@ -203,8 +450,8 @@ class VesselSimulator:
         origin = TRADE_PORTS[origin_idx]
         destination = TRADE_PORTS[dest_idx]
 
-        # Generate great-circle waypoints for the route
-        self.waypoints = generate_great_circle_waypoints(origin, destination, 50)
+        # Generate ocean-routed waypoints (via maritime chokepoints) for the route
+        self.waypoints = generate_maritime_route(origin, destination, 50)
 
         # Progress along the route (0..1), with random start position
         self.progress = random.random()
