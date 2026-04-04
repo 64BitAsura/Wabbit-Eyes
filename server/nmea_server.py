@@ -366,6 +366,14 @@ class FleetSimulator:
                     v.tick()
                 if self.anomaly_injector:
                     self.anomaly_injector.tick()
+            # Broadcast a batch every tick (WS + NATS are decoupled from SSE clients)
+            if self.ws_broadcaster or self.nats_publisher:
+                batch_size = 50 + random.randint(0, 50)
+                batch_json = self.get_batch_json(batch_size)
+                if self.ws_broadcaster:
+                    self.ws_broadcaster.broadcast(batch_json)
+                if self.nats_publisher:
+                    self.nats_publisher.publish_batch(batch_json)
             time.sleep(interval)
 
     def get_all_json(self):
@@ -652,32 +660,23 @@ class SSEHandler(BaseHTTPRequestHandler):
         self._cors_headers()
         self.end_headers()
 
+        if not simulator:
+            return
+
         try:
             # Initial batch – all vessels
-            all_json = simulator.get_all_json()
-            data = json.dumps(all_json)
+            data = json.dumps(simulator.get_all_json())
             self.wfile.write(f"data: {data}\n\n".encode())
             self.wfile.flush()
-
-            if simulator.ws_broadcaster:
-                simulator.ws_broadcaster.broadcast(all_json)
-            if simulator.nats_publisher:
-                simulator.nats_publisher.publish_batch(all_json)
 
             # Periodic updates
             interval = EMIT_INTERVAL_MS / 1000.0
             while True:
                 time.sleep(interval)
                 batch_size = 50 + random.randint(0, 50)
-                batch_json = simulator.get_batch_json(batch_size)
-                data = json.dumps(batch_json)
+                data = json.dumps(simulator.get_batch_json(batch_size))
                 self.wfile.write(f"data: {data}\n\n".encode())
                 self.wfile.flush()
-
-                if simulator.ws_broadcaster:
-                    simulator.ws_broadcaster.broadcast(batch_json)
-                if simulator.nats_publisher:
-                    simulator.nats_publisher.publish_batch(batch_json)
         except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError, OSError):
             pass
 
@@ -697,6 +696,8 @@ class SSEHandler(BaseHTTPRequestHandler):
 
         poll_interval = 0.1  # 100 ms polling
         try:
+            if not simulator:
+                return
             while True:
                 if NATS_URL:
                     with _nats_classified_lock:
