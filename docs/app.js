@@ -44,8 +44,6 @@
   const tooltipEl = document.getElementById('tooltip');
   const toggleTrails = document.getElementById('toggle-trails');
   const toggleGrid = document.getElementById('toggle-grid');
-  const toggleDemo = document.getElementById('toggle-demo');
-
   // --------------- Three.js setup ---------------
   const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: false });
   renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
@@ -424,7 +422,6 @@
 
   // --------------- Streaming Connection ---------------
   let eventSource = null;
-  let demoMode = false;
 
   function connectStream(url) {
     if (eventSource) {
@@ -454,63 +451,10 @@
     eventSource.onerror = () => {
       streamStatusEl.textContent = 'OFFLINE';
       streamStatusEl.className = 'disconnected';
-      // Auto-retry is built into EventSource, but fall back to demo mode after a while
-      setTimeout(() => {
-        if (eventSource && eventSource.readyState === EventSource.CLOSED) {
-          startDemoMode();
-        }
-      }, 5000);
     };
   }
 
-  function startDemoMode() {
-    if (demoMode) return;
-    demoMode = true;
-    toggleDemo.checked = true;
-    if (eventSource) {
-      eventSource.close();
-      eventSource = null;
-    }
-    streamStatusEl.textContent = 'DEMO';
-    streamStatusEl.className = 'connected';
-    MockClient.start((data) => {
-      processData(data);
-    });
-  }
-
-  function stopDemoMode() {
-    demoMode = false;
-    MockClient.stop();
-  }
-
-  // Toggle demo mode
-  toggleDemo.addEventListener('change', () => {
-    if (toggleDemo.checked) {
-      startDemoMode();
-    } else {
-      stopDemoMode();
-      // Try to reconnect to server
-      tryConnect();
-    }
-  });
-
-  // Detect environment and connect
-  function tryConnect() {
-    // If served from GitHub Pages or file://, go straight to demo mode
-    const isGitHubPages = window.location.hostname === 'github.io' ||
-      window.location.hostname.endsWith('.github.io');
-    const isFile = window.location.protocol === 'file:';
-
-    if (isGitHubPages || isFile) {
-      startDemoMode();
-      return;
-    }
-
-    // Try connecting to same-origin /stream
-    const streamUrl = `${window.location.origin}/stream`;
-    connectStream(streamUrl);
-  }
-
-  tryConnect();
+  // Connect to NMEA simulator server
+  connectStream(`${window.location.origin}/stream`);
 
 })();
