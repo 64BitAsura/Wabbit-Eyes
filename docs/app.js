@@ -451,6 +451,7 @@
     eventSource.onerror = () => {
       streamStatusEl.textContent = 'OFFLINE';
       streamStatusEl.className = 'disconnected';
+      console.warn('NMEA simulator server connection lost. Ensure server/nmea_server.py is running.');
     };
   }
 
