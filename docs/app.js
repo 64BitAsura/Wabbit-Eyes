@@ -51,9 +51,11 @@
   const anomalyFeedListEl = document.getElementById('anomaly-feed-list');
   const toggleTrails = document.getElementById('toggle-trails');
   const toggleGrid = document.getElementById('toggle-grid');
+  const toggleRoutes = document.getElementById('toggle-routes');
   const toggleDemo = document.getElementById('toggle-demo');
   const toggleFeed = document.getElementById('toggle-feed');
   const toggleHeatmap = document.getElementById('toggle-heatmap');
+
 
   // --------------- Three.js setup ---------------
   const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: false });
@@ -253,12 +255,74 @@
   const trailGroup = new THREE.Group();
   scene.add(trailGroup);
 
+  // --------------- Shipping Route Layer ---------------
+  const routeGroup = new THREE.Group();
+  scene.add(routeGroup);
+
+  function clearRouteLines() {
+    while (routeGroup.children.length) {
+      const child = routeGroup.children.pop();
+      routeGroup.remove(child);
+      if (child.geometry) child.geometry.dispose();
+      if (child.material) child.material.dispose();
+    }
+  }
+
+  function renderRouteLines(lanes) {
+    clearRouteLines();
+    if (!Array.isArray(lanes)) return;
+
+    lanes.forEach((lane) => {
+      if (!Array.isArray(lane) || lane.length < 2) return;
+
+      const points = [];
+      for (let i = 0; i < lane.length; i++) {
+        const p = lane[i];
+        const lon = typeof p.lon === 'number' ? p.lon : p[0];
+        const lat = typeof p.lat === 'number' ? p.lat : p[1];
+        if (typeof lon !== 'number' || typeof lat !== 'number') continue;
+        points.push(new THREE.Vector3(lon, lat, 0.2));
+      }
+      if (points.length < 2) return;
+
+      const coreGeo = new THREE.BufferGeometry().setFromPoints(points);
+      const coreMat = new THREE.LineBasicMaterial({
+        color: 0x2ce6ff,
+        transparent: true,
+        opacity: 0.45,
+      });
+      routeGroup.add(new THREE.Line(coreGeo, coreMat));
+
+      const glowGeo = new THREE.BufferGeometry().setFromPoints(points);
+      const glowMat = new THREE.LineBasicMaterial({
+        color: 0x8fd8ff,
+        transparent: true,
+        opacity: 0.18,
+      });
+      routeGroup.add(new THREE.Line(glowGeo, glowMat));
+    });
+
+    routeGroup.visible = !!toggleRoutes?.checked;
+  }
+
+  async function loadShippingRoutes() {
+    try {
+      const response = await fetch(`${window.location.origin}/routes`);
+      if (!response.ok) return;
+      const payload = await response.json();
+      renderRouteLines(payload.lanes || []);
+    } catch (e) {
+      // Ignore lane overlay fetch failures (demo/offline mode).
+    }
+  }
+
   // --------------- Data Store ---------------
   const vessels = new Map(); // id -> vessel data
   const trailLines = new Map(); // id -> { line, buffer, len }
   const mmsiToId = new Map(); // mmsi -> vessel id (for classification lookup)
   let trailsDirty = false; // only rebuild trails when new data arrives
 
+<<<<<<< Updated upstream
   // Classification summary counts
   const classStats = { NORMAL: 0, ANOMALY: 0, WARMING: 0 };
 
@@ -271,6 +335,101 @@
     regime_change:     new THREE.Color(0xaa00ff),
   };
   const ANOMALY_COLOR_DEFAULT = new THREE.Color(0xe040fb);
+=======
+  // --------------- Land/Water Guard ---------------
+  const landPolygons = [];
+
+  function normalizeLon(lon) {
+    let out = lon;
+    while (out > 180) out -= 360;
+    while (out < -180) out += 360;
+    return out;
+  }
+
+  function clampLat(lat) {
+    return Math.max(-89.9, Math.min(89.9, lat));
+  }
+
+  function pointInPolygon(x, y, points) {
+    let inside = false;
+    for (let i = 0, j = points.length - 1; i < points.length; j = i++) {
+      const xi = points[i][0], yi = points[i][1];
+      const xj = points[j][0], yj = points[j][1];
+      const intersects = ((yi > y) !== (yj > y)) &&
+        (x < (xj - xi) * (y - yi) / ((yj - yi) || 1e-9) + xi);
+      if (intersects) inside = !inside;
+    }
+    return inside;
+  }
+
+  function buildLandPolygons() {
+    GeoData.coastlines.forEach((line) => {
+      if (!Array.isArray(line) || line.length < 3) return;
+      let minLon = 180;
+      let maxLon = -180;
+      let minLat = 90;
+      let maxLat = -90;
+
+      for (let i = 0; i < line.length; i++) {
+        const lon = line[i][0];
+        const lat = line[i][1];
+        if (lon < minLon) minLon = lon;
+        if (lon > maxLon) maxLon = lon;
+        if (lat < minLat) minLat = lat;
+        if (lat > maxLat) maxLat = lat;
+      }
+
+      landPolygons.push({
+        points: line,
+        minLon,
+        maxLon,
+        minLat,
+        maxLat,
+      });
+    });
+  }
+
+  function isOnLand(lon, lat) {
+    const nLon = normalizeLon(lon);
+    const nLat = clampLat(lat);
+    for (let i = 0; i < landPolygons.length; i++) {
+      const poly = landPolygons[i];
+      if (nLon < poly.minLon || nLon > poly.maxLon || nLat < poly.minLat || nLat > poly.maxLat) {
+        continue;
+      }
+      if (pointInPolygon(nLon, nLat, poly.points)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  function findNearestWater(lon, lat) {
+    const baseLon = normalizeLon(lon);
+    const baseLat = clampLat(lat);
+    if (!isOnLand(baseLon, baseLat)) {
+      return { lon: baseLon, lat: baseLat };
+    }
+
+    const maxRadius = 3.0;
+    const radiusStep = 0.15;
+    const angleStep = Math.PI / 6;
+
+    for (let r = radiusStep; r <= maxRadius; r += radiusStep) {
+      for (let a = 0; a < Math.PI * 2; a += angleStep) {
+        const candidateLon = normalizeLon(baseLon + Math.cos(a) * r);
+        const candidateLat = clampLat(baseLat + Math.sin(a) * r);
+        if (!isOnLand(candidateLon, candidateLat)) {
+          return { lon: candidateLon, lat: candidateLat };
+        }
+      }
+    }
+
+    return null;
+  }
+
+  buildLandPolygons();
+>>>>>>> Stashed changes
 
   function getVesselColor(type) {
     return COLORS.vessel[type] || COLORS.vessel.default;
@@ -296,15 +455,35 @@
         vessels.set(obj.id, existing);
         if (obj.mmsi) mmsiToId.set(obj.mmsi, obj.id);
       }
-      existing.longitude = obj.longitude;
-      existing.latitude = obj.latitude;
+
+      let nextLon = obj.longitude;
+      let nextLat = obj.latitude;
+
+      if (isOnLand(nextLon, nextLat)) {
+        const waterPoint = findNearestWater(nextLon, nextLat);
+        if (waterPoint) {
+          nextLon = waterPoint.lon;
+          nextLat = waterPoint.lat;
+        } else if (
+          typeof existing.longitude === 'number' &&
+          typeof existing.latitude === 'number' &&
+          !isOnLand(existing.longitude, existing.latitude)
+        ) {
+          // Keep last known safe water position if correction fails.
+          nextLon = existing.longitude;
+          nextLat = existing.latitude;
+        }
+      }
+
+      existing.longitude = nextLon;
+      existing.latitude = nextLat;
       existing.elevation = obj.elevation;
       existing.velocity = obj.velocity;
       existing.direction = obj.direction;
       existing.timestamp = obj.timestamp || now;
 
       // Add trail point
-      existing.trail.push({ x: obj.longitude, y: obj.latitude, t: now });
+      existing.trail.push({ x: nextLon, y: nextLat, t: now });
       if (existing.trail.length > TRAIL_LENGTH) {
         existing.trail.shift();
       }
@@ -618,6 +797,7 @@
     updateTrails();
     updateHeatmap();
     gridGroup.visible = toggleGrid.checked;
+    routeGroup.visible = !!toggleRoutes?.checked;
     renderer.render(scene, camera);
     updateFPS();
   }
@@ -656,12 +836,7 @@
     eventSource.onerror = () => {
       streamStatusEl.textContent = 'OFFLINE';
       streamStatusEl.className = 'disconnected';
-      // Auto-retry is built into EventSource, but fall back to demo mode after a while
-      setTimeout(() => {
-        if (eventSource && eventSource.readyState === EventSource.CLOSED) {
-          startDemoMode();
-        }
-      }, 5000);
+      console.warn('NMEA simulator server connection lost. Ensure server/nmea_server.py is running.');
     };
   }
 
@@ -736,6 +911,12 @@
     }
   });
 
+  if (toggleRoutes) {
+    toggleRoutes.addEventListener('change', () => {
+      routeGroup.visible = toggleRoutes.checked;
+    });
+  }
+
   // Detect environment and connect
   function tryConnect() {
     // If served from GitHub Pages or file://, go straight to demo mode
@@ -748,9 +929,17 @@
       return;
     }
 
+<<<<<<< Updated upstream
     // Try connecting to same-origin /stream and /classified
     connectStream(`${window.location.origin}/stream`);
     connectClassifiedStream(`${window.location.origin}/classified`);
+=======
+    loadShippingRoutes();
+
+    // Try connecting to same-origin /stream
+    const streamUrl = `${window.location.origin}/stream`;
+    connectStream(streamUrl);
+>>>>>>> Stashed changes
   }
 
   tryConnect();

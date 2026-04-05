@@ -14,6 +14,9 @@ const path = require('path');
 const PORT = process.env.PORT || 3000;
 const VESSEL_COUNT = 1000;
 const EMIT_INTERVAL_MS = 200; // 5 updates/sec
+const TIME_SCALE = Number(process.env.SIM_TIME_SCALE || 120);
+const LNG_OFFSET_MAX_DEG = Number(process.env.SIM_LNG_OFFSET_MAX_DEG || 0.08);
+const LAT_OFFSET_MAX_DEG = Number(process.env.SIM_LAT_OFFSET_MAX_DEG || 0.04);
 
 // --------------- Major Trade Ports ---------------
 const TRADE_PORTS = [
@@ -60,8 +63,6 @@ const SPEED_RANGES = {
   roro:         { min: 15, max: 20 },
   passenger:    { min: 18, max: 24 },
 };
-
-const TIME_SCALE = 3000;
 
 // --------------- Great Circle Route Generation ---------------
 
@@ -144,8 +145,8 @@ class Vessel {
 
     this.progress = Math.random();
     this.reverse = Math.random() > 0.5;
-    this.lngOffset = (Math.random() - 0.5) * 1.0;
-    this.latOffset = (Math.random() - 0.5) * 0.5;
+    this.lngOffset = (Math.random() * 2 - 1) * LNG_OFFSET_MAX_DEG;
+    this.latOffset = (Math.random() * 2 - 1) * LAT_OFFSET_MAX_DEG;
     this.elevation = Math.random() * 5;
 
     const range = SPEED_RANGES[this.type];

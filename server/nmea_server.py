@@ -18,7 +18,11 @@ import time
 import random
 import asyncio
 import threading
+<<<<<<< Updated upstream
 from collections import deque
+=======
+import argparse
+>>>>>>> Stashed changes
 from datetime import datetime, timezone
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
@@ -26,14 +30,29 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from nmea_simulator import GPRMC, VHW, TrackManager
+from sea_routes import build_port_route_waypoints, get_shipping_lane_polylines
 
 # --------------- Configuration ---------------
+<<<<<<< Updated upstream
 PORT = int(os.environ.get('PORT', 3000))
 WS_PORT = int(os.environ.get('WS_PORT', 3001))
 NATS_URL = os.environ.get('NATS_URL', '')   # e.g. "nats://localhost:4222"
+=======
+PORT = 3000
+>>>>>>> Stashed changes
 VESSEL_COUNT = 1000
 EMIT_INTERVAL_MS = 200
-TIME_SCALE = 3000
+# Time compression for simulation progress. 120 means 1 real second ~= 2 sim minutes.
+TIME_SCALE = 120.0
+
+# Route jitter in degrees. Keep small to avoid vessels drifting onto land.
+LNG_OFFSET_MAX_DEG = 0.08
+LAT_OFFSET_MAX_DEG = 0.04
+
+# Keep simulated positions tightly snapped to route centerlines.
+LANE_SNAP_FACTOR = 0.92
+COASTAL_LANE_SNAP_FACTOR = 0.98
+COASTAL_PROGRESS_BAND = 0.12
 
 # --------------- Major Trade Ports ---------------
 TRADE_PORTS = [
@@ -83,6 +102,177 @@ SPEED_RANGES = {
     'roro':         (15, 20),
     'passenger':    (18, 24),
 }
+
+
+def _safe_int(value, default):
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _safe_float(value, default):
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _normalize_speed_ranges(raw_ranges):
+    """Normalize speed range config into {type: (min, max)} mapping."""
+    if not isinstance(raw_ranges, dict):
+        return None
+
+    normalized = {}
+    for vessel_type, spec in raw_ranges.items():
+        low = None
+        high = None
+
+        if isinstance(spec, dict):
+            low = spec.get('min')
+            high = spec.get('max')
+        elif isinstance(spec, (list, tuple)) and len(spec) >= 2:
+            low, high = spec[0], spec[1]
+
+        low = _safe_float(low, None)
+        high = _safe_float(high, None)
+        if low is None or high is None:
+            continue
+        if high < low:
+            low, high = high, low
+        normalized[vessel_type] = (low, high)
+
+    return normalized if normalized else None
+
+
+def _normalize_ports(raw_ports):
+    """Normalize trade ports into [{'name', 'lat', 'lon'}]."""
+    if not isinstance(raw_ports, list):
+        return None
+
+    ports = []
+    for idx, port in enumerate(raw_ports):
+        if not isinstance(port, dict):
+            continue
+        lat = _safe_float(port.get('lat'), None)
+        lon = port.get('lon', port.get('lng'))
+        lon = _safe_float(lon, None)
+        if lat is None or lon is None:
+            continue
+
+        name = port.get('name') or f"Port-{idx + 1}"
+        ports.append({'name': str(name), 'lat': lat, 'lon': lon})
+
+    return ports if len(ports) >= 2 else None
+
+
+def apply_runtime_config(config_path=None):
+    """
+    Apply runtime configuration from JSON file and environment variables.
+
+    Priority:
+    1) Built-in defaults
+    2) JSON config (if provided)
+    3) Environment overrides
+    """
+    global PORT, VESSEL_COUNT, EMIT_INTERVAL_MS, TIME_SCALE
+    global LNG_OFFSET_MAX_DEG, LAT_OFFSET_MAX_DEG
+    global LANE_SNAP_FACTOR, COASTAL_LANE_SNAP_FACTOR, COASTAL_PROGRESS_BAND
+    global TRADE_PORTS, VESSEL_TYPES, SPEED_RANGES
+
+    if config_path:
+        with open(config_path, 'r', encoding='utf-8') as f:
+            loaded = json.load(f)
+
+        if not isinstance(loaded, dict):
+            raise ValueError('Config file root must be a JSON object')
+
+        sim_cfg = loaded.get('simulation', {})
+        if not isinstance(sim_cfg, dict):
+            sim_cfg = {}
+
+        # Scalars
+        PORT = _safe_int(loaded.get('port', PORT), PORT)
+        VESSEL_COUNT = _safe_int(
+            sim_cfg.get('vessel_count', loaded.get('vessel_count', VESSEL_COUNT)),
+            VESSEL_COUNT,
+        )
+        EMIT_INTERVAL_MS = _safe_int(
+            sim_cfg.get('emit_interval_ms', loaded.get('emit_interval_ms', EMIT_INTERVAL_MS)),
+            EMIT_INTERVAL_MS,
+        )
+        TIME_SCALE = _safe_float(
+            sim_cfg.get('time_scale', loaded.get('time_scale', TIME_SCALE)),
+            TIME_SCALE,
+        )
+        LNG_OFFSET_MAX_DEG = _safe_float(
+            sim_cfg.get('lng_offset_max_deg', loaded.get('lng_offset_max_deg', LNG_OFFSET_MAX_DEG)),
+            LNG_OFFSET_MAX_DEG,
+        )
+        LAT_OFFSET_MAX_DEG = _safe_float(
+            sim_cfg.get('lat_offset_max_deg', loaded.get('lat_offset_max_deg', LAT_OFFSET_MAX_DEG)),
+            LAT_OFFSET_MAX_DEG,
+        )
+        LANE_SNAP_FACTOR = _safe_float(
+            sim_cfg.get('lane_snap_factor', loaded.get('lane_snap_factor', LANE_SNAP_FACTOR)),
+            LANE_SNAP_FACTOR,
+        )
+        COASTAL_LANE_SNAP_FACTOR = _safe_float(
+            sim_cfg.get(
+                'coastal_lane_snap_factor',
+                loaded.get('coastal_lane_snap_factor', COASTAL_LANE_SNAP_FACTOR),
+            ),
+            COASTAL_LANE_SNAP_FACTOR,
+        )
+        COASTAL_PROGRESS_BAND = _safe_float(
+            sim_cfg.get('coastal_progress_band', loaded.get('coastal_progress_band', COASTAL_PROGRESS_BAND)),
+            COASTAL_PROGRESS_BAND,
+        )
+
+        # Collection overrides
+        ports = _normalize_ports(loaded.get('trade_ports'))
+        if ports:
+            TRADE_PORTS = ports
+
+        vessel_types = loaded.get('vessel_types')
+        if isinstance(vessel_types, list) and vessel_types:
+            VESSEL_TYPES = [str(v) for v in vessel_types if str(v).strip()]
+
+        speed_ranges = _normalize_speed_ranges(loaded.get('speed_ranges'))
+        if speed_ranges:
+            SPEED_RANGES = speed_ranges
+
+    # Environment overrides for runtime operations
+    PORT = _safe_int(os.environ.get('PORT', PORT), PORT)
+    VESSEL_COUNT = max(1, _safe_int(os.environ.get('VESSEL_COUNT', VESSEL_COUNT), VESSEL_COUNT))
+    EMIT_INTERVAL_MS = max(10, _safe_int(os.environ.get('EMIT_INTERVAL_MS', EMIT_INTERVAL_MS), EMIT_INTERVAL_MS))
+    TIME_SCALE = max(0.1, _safe_float(os.environ.get('SIM_TIME_SCALE', TIME_SCALE), TIME_SCALE))
+    LNG_OFFSET_MAX_DEG = max(0.0, _safe_float(os.environ.get('SIM_LNG_OFFSET_MAX_DEG', LNG_OFFSET_MAX_DEG), LNG_OFFSET_MAX_DEG))
+    LAT_OFFSET_MAX_DEG = max(0.0, _safe_float(os.environ.get('SIM_LAT_OFFSET_MAX_DEG', LAT_OFFSET_MAX_DEG), LAT_OFFSET_MAX_DEG))
+    LANE_SNAP_FACTOR = min(1.0, max(0.0, _safe_float(os.environ.get('SIM_LANE_SNAP_FACTOR', LANE_SNAP_FACTOR), LANE_SNAP_FACTOR)))
+    COASTAL_LANE_SNAP_FACTOR = min(
+        1.0,
+        max(
+            LANE_SNAP_FACTOR,
+            _safe_float(
+                os.environ.get('SIM_COASTAL_LANE_SNAP_FACTOR', COASTAL_LANE_SNAP_FACTOR),
+                COASTAL_LANE_SNAP_FACTOR,
+            ),
+        ),
+    )
+    COASTAL_PROGRESS_BAND = min(
+        0.45,
+        max(0.0, _safe_float(os.environ.get('SIM_COASTAL_PROGRESS_BAND', COASTAL_PROGRESS_BAND), COASTAL_PROGRESS_BAND)),
+    )
+
+    # Keep vessel type list and speed ranges in sync
+    VESSEL_TYPES = [t for t in VESSEL_TYPES if t in SPEED_RANGES]
+    if not VESSEL_TYPES:
+        raise ValueError('No valid vessel types available after configuration')
+
+    # Ensure at least two ports for route generation
+    if len(TRADE_PORTS) < 2:
+        raise ValueError('Configuration must provide at least two trade ports')
 
 
 # --------------- Great Circle Route Generation ---------------
@@ -191,7 +381,7 @@ def _calc_route_length_nm(waypoints):
 
 class VesselSimulator:
     """
-    Simulates a single vessel travelling along a great-circle route
+    Simulates a single vessel travelling along sea-lane route segments
     between two trade ports, using NMEA_Simulator's GPRMC generator
     to produce NMEA sentences for position data.
     """
@@ -209,16 +399,16 @@ class VesselSimulator:
         origin = TRADE_PORTS[origin_idx]
         destination = TRADE_PORTS[dest_idx]
 
-        # Generate great-circle waypoints for the route
-        self.waypoints = generate_great_circle_waypoints(origin, destination, 50)
+        # Generate sea-lane constrained waypoints for the route
+        self.waypoints = build_port_route_waypoints(origin, destination, vessel_type=self.type)
 
         # Progress along the route (0..1), with random start position
         self.progress = random.random()
         self.reverse = random.random() > 0.5
 
-        # Small offset from the route centerline
-        self.lng_offset = (random.random() - 0.5) * 1.0
-        self.lat_offset = (random.random() - 0.5) * 0.5
+        # Keep small offset from route centerline so traffic stays near lanes
+        self.lng_offset = random.uniform(-LNG_OFFSET_MAX_DEG, LNG_OFFSET_MAX_DEG)
+        self.lat_offset = random.uniform(-LAT_OFFSET_MAX_DEG, LAT_OFFSET_MAX_DEG)
 
         # Route length for speed calculation
         self.route_length_nm = _calc_route_length_nm(self.waypoints)
@@ -271,8 +461,16 @@ class VesselSimulator:
     def _update_position(self):
         """Update latitude, longitude, direction from current progress."""
         lat, lon, d_lng, d_lat = self._interpolate(self.progress)
-        self.latitude = lat + self.lat_offset
-        self.longitude = lon + self.lng_offset
+
+        near_coast = (
+            self.progress <= COASTAL_PROGRESS_BAND or
+            self.progress >= (1.0 - COASTAL_PROGRESS_BAND)
+        )
+        snap_factor = COASTAL_LANE_SNAP_FACTOR if near_coast else LANE_SNAP_FACTOR
+        offset_scale = 1.0 - snap_factor
+
+        self.latitude = lat + (self.lat_offset * offset_scale)
+        self.longitude = lon + (self.lng_offset * offset_scale)
 
         direction = math.degrees(math.atan2(d_lng, d_lat))
         self.direction = (direction + 360) % 360
@@ -621,6 +819,7 @@ MIME_TYPES = {
 
 # Global fleet simulator (set in main)
 simulator = None
+<<<<<<< Updated upstream
 # Global NATS classification event queue (populated by NATSPublisher callback)
 _nats_classified_events = deque(maxlen=500)
 _nats_classified_lock = threading.Lock()
@@ -629,6 +828,9 @@ _nats_classified_lock = threading.Lock()
 def _nats_classification_callback(event):
     with _nats_classified_lock:
         _nats_classified_events.append(event)
+=======
+SHIPPING_LANES = get_shipping_lane_polylines()
+>>>>>>> Stashed changes
 
 
 class SSEHandler(BaseHTTPRequestHandler):
@@ -642,8 +844,13 @@ class SSEHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path == '/stream':
             self._handle_stream()
+<<<<<<< Updated upstream
         elif self.path == '/classified':
             self._handle_classified()
+=======
+        elif self.path == '/routes':
+            self._handle_routes()
+>>>>>>> Stashed changes
         else:
             self._serve_static()
 
@@ -680,6 +887,7 @@ class SSEHandler(BaseHTTPRequestHandler):
         except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError, OSError):
             pass
 
+<<<<<<< Updated upstream
     def _handle_classified(self):
         """
         SSE endpoint that streams classification events.
@@ -713,6 +921,18 @@ class SSEHandler(BaseHTTPRequestHandler):
                 time.sleep(poll_interval)
         except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError, OSError):
             pass
+=======
+    def _handle_routes(self):
+        self.send_response(200)
+        self.send_header('Content-Type', 'application/json')
+        self._cors_headers()
+        self.end_headers()
+        payload = {
+            'lanes': SHIPPING_LANES,
+            'source': 'major-maritime-chokepoints',
+        }
+        self.wfile.write(json.dumps(payload).encode())
+>>>>>>> Stashed changes
 
     def _serve_static(self):
         file_path = self.path if self.path != '/' else '/index.html'
@@ -745,8 +965,23 @@ class SSEHandler(BaseHTTPRequestHandler):
 
 # --------------- Main ---------------
 
-def main():
+def main(argv=None):
     global simulator
+
+    parser = argparse.ArgumentParser(description='Wabbit-Eyes NMEA server')
+    parser.add_argument(
+        '--config',
+        dest='config_path',
+        default=os.environ.get('NMEA_CONFIG_FILE'),
+        help='Path to JSON config file',
+    )
+    args = parser.parse_args(argv)
+
+    try:
+        apply_runtime_config(args.config_path)
+    except Exception as e:
+        print(f"Configuration error: {e}")
+        return 1
 
     print(f"🚢 Initializing {VESSEL_COUNT} vessels with NMEA Simulator...")
     fleet = [VesselSimulator(i) for i in range(VESSEL_COUNT)]
@@ -778,6 +1013,9 @@ def main():
     print(f"   Classified endpoint: http://localhost:{PORT}/classified")
     print(f"   WebSocket endpoint:  ws://localhost:{WS_PORT}")
     print(f"   Serving UI from {DOCS_DIR}")
+    if args.config_path:
+        print(f"   Loaded config: {args.config_path}")
+    print(f"   Tick interval: {EMIT_INTERVAL_MS} ms | Time scale: {TIME_SCALE}")
     print(f"   Powered by NMEA_Simulator (github.com/Kafkar/NMEA_Simulator)")
     if NATS_URL:
         print(f"   NATS: {NATS_URL}")
@@ -789,6 +1027,8 @@ def main():
         simulator.stop()
         server.server_close()
 
+    return 0
+
 
 if __name__ == '__main__':
-    main()
+    raise SystemExit(main())

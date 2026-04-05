@@ -55,7 +55,9 @@ const MockClient = (() => {
 
   const VESSEL_COUNT = 1000;
   const EMIT_INTERVAL_MS = 200;
-  const TIME_SCALE = 3000;
+  const TIME_SCALE = 120;
+  const LNG_OFFSET_MAX_DEG = 0.08;
+  const LAT_OFFSET_MAX_DEG = 0.04;
 
   // --------------- Great Circle Route Generation ---------------
 
@@ -201,8 +203,8 @@ const MockClient = (() => {
 
       this.progress = Math.random();
       this.reverse = Math.random() > 0.5;
-      this.lngOffset = (Math.random() - 0.5) * 1.0;
-      this.latOffset = (Math.random() - 0.5) * 0.5;
+      this.lngOffset = (Math.random() * 2 - 1) * LNG_OFFSET_MAX_DEG;
+      this.latOffset = (Math.random() * 2 - 1) * LAT_OFFSET_MAX_DEG;
       this.elevation = Math.random() * 5;
 
       const range = SPEED_RANGES[this.type];
